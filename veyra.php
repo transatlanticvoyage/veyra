@@ -14,7 +14,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants
-define('VEYRA_PLUGIN_VERSION', '1.0.0');
+define('VEYRA_PLUGIN_VERSION', '1.1.0');
 define('VEYRA_PLUGIN_PATH', plugin_dir_path(__FILE__));
 define('VEYRA_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -55,8 +55,8 @@ class Veyra {
             return;
         }
         
-        wp_enqueue_script('veyra-elephant-tools', VEYRA_PLUGIN_URL . 'assets/elephant-tools.js', array('jquery'), VEYRA_PLUGIN_VERSION, true);
-        wp_enqueue_style('veyra-elephant-tools', VEYRA_PLUGIN_URL . 'assets/elephant-tools.css', array(), VEYRA_PLUGIN_VERSION);
+        wp_enqueue_script('veyra-elephant-tools', VEYRA_PLUGIN_URL . 'assets/elephant-tools.js', array('jquery'), VEYRA_PLUGIN_VERSION . '.' . time(), true);
+        wp_enqueue_style('veyra-elephant-tools', VEYRA_PLUGIN_URL . 'assets/elephant-tools.css', array(), VEYRA_PLUGIN_VERSION . '.' . time());
         
         wp_localize_script('veyra-elephant-tools', 'veyra_ajax', array(
             'ajax_url' => admin_url('admin-ajax.php'),
