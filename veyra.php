@@ -127,6 +127,7 @@ class Veyra {
         
         $post_id = intval($_POST['post_id']);
         $replex_content = isset($_POST['replex_content']) ? wp_kses_post($_POST['replex_content']) : '';
+        $auto_update_title = isset($_POST['auto_update_title']) ? intval($_POST['auto_update_title']) : 0;
         
         // Remove backslashes from all shortcode content
         $replex_content = preg_replace_callback('/\[[^[\]]+\]/', function($matches) {
@@ -175,6 +176,21 @@ class Veyra {
             return;
         }
 
+        // Handle post title update if toggle is enabled
+        $title_updated = false;
+        if ($auto_update_title) {
+            $new_title = $this->extract_first_title_from_replex($replex_content);
+            if ($new_title) {
+                $result = wp_update_post(array(
+                    'ID' => $post_id,
+                    'post_title' => $new_title
+                ));
+                if (!is_wp_error($result)) {
+                    $title_updated = true;
+                }
+            }
+        }
+
         // Get Elementor data
         $data = get_post_meta($post_id, '_elementor_data', true);
         if (!$data) {
@@ -216,8 +232,12 @@ class Veyra {
                     $elementor_instance->files_manager->clear_cache();
                 }
                 
+                $message = 'Content replaced successfully! ' . $processed_count . ' replacement(s) made.';
+                if ($title_updated) {
+                    $message .= ' Post title updated.';
+                }
                 wp_send_json_success(array(
-                    'message' => 'Content replaced successfully! ' . $processed_count . ' replacement(s) made.'
+                    'message' => $message
                 ));
                 return;
             }
@@ -226,8 +246,12 @@ class Veyra {
         // Fallback: Save directly to post meta
         update_post_meta($post_id, '_elementor_data', $updated_data);
         
+        $message = 'Content replaced successfully! ' . $processed_count . ' replacement(s) made.';
+        if ($title_updated) {
+            $message .= ' Post title updated.';
+        }
         wp_send_json_success(array(
-            'message' => 'Content replaced successfully! ' . $processed_count . ' replacement(s) made.'
+            'message' => $message
         ));
     }
     
@@ -351,6 +375,24 @@ class Veyra {
             }
         }
         return $elements;
+    }
+    
+    private function extract_first_title_from_replex($content) {
+        $lines = preg_split('/\r\n|\r|\n/', $content);
+        $found_first_code = false;
+        
+        foreach ($lines as $line) {
+            // Check if line starts with ##
+            if (preg_match('/^##(.+)$/', $line)) {
+                $found_first_code = true;
+                continue;
+            }
+            // If we found the first code and this line has content, return it
+            if ($found_first_code && trim($line)) {
+                return trim($line);
+            }
+        }
+        return null;
     }
 }
 

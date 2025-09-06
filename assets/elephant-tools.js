@@ -39,6 +39,13 @@
                             '<label for="veyra-replex-content" style="display: block; font-weight: bold; margin-bottom: 5px;">replex_submit_box (replace codes directly only)</label>' +
                             '<textarea id="veyra-replex-content" placeholder="Enter content with ##codes to replace directly in text" style="width: 100%; height: 150px; font-family: monospace; font-size: 12px; padding: 10px; border: 1px solid #ccc; border-radius: 3px; box-sizing: border-box;"></textarea>' +
                             '<button type="button" id="veyra-replex-submit-btn" style="margin-top: 10px; background: #0073aa; color: white; border: none; padding: 8px 16px; border-radius: 3px; cursor: pointer; font-size: 14px;">run function_inject_content_5</button>' +
+                            '<div class="veyra-toggle-container" style="margin-top: 15px; display: flex; align-items: center; gap: 10px;">' +
+                                '<label class="veyra-toggle-switch">' +
+                                    '<input type="checkbox" id="veyra-auto-title-toggle" checked>' +
+                                    '<span class="veyra-toggle-slider"></span>' +
+                                '</label>' +
+                                '<span style="font-size: 12px; color: #666;">replace wp_posts.post_title with the first line of text following the double-pound-sign "##" code in the submission</span>' +
+                            '</div>' +
                             '<div id="veyra-replex-result" style="margin-top: 10px; padding: 10px; border-radius: 4px; display: none;"></div>' +
                         '</div>' +
                     '</div>' +
@@ -193,6 +200,7 @@
         submitReplexContent: function() {
             var self = this;
             var content = $('#veyra-replex-content').val();
+            var autoUpdateTitle = $('#veyra-auto-title-toggle').is(':checked');
             var $btn = $('#veyra-replex-submit-btn');
             var $result = $('#veyra-replex-result');
             
@@ -217,6 +225,7 @@
                     action: 'veyra_inject_replex_content',
                     post_id: veyra_ajax.current_post_id,
                     replex_content: content,
+                    auto_update_title: autoUpdateTitle ? 1 : 0,
                     nonce: veyra_ajax.nonce
                 },
                 success: function(response) {
