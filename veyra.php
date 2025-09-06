@@ -2,8 +2,8 @@
 /**
  * Plugin Name: Veyra
  * Plugin URI: https://github.com/transatlanticvoyage/veyra
- * Description: Veyra - WordPress plugin for zen data management
- * Version: 1.0.0
+ * Description: Veyra - WordPress plugin for zen data management with Elephant Tools functionality
+ * Version: 1.1.0
  * Author: Veyra Team
  * License: GPL v2 or later
  */
@@ -40,9 +40,11 @@ class Veyra {
             return;
         }
         
+        $logo_svg = '<img src="' . VEYRA_PLUGIN_URL . 'assets/images/veyra-sun-logo.svg" style="width: 16px; height: 16px; margin-right: 6px; vertical-align: middle;" alt="Veyra Logo" />';
+        
         $wp_admin_bar->add_node(array(
-            'id' => 'elephant-tools',
-            'title' => 'Elephant Tools',
+            'id' => 'veyra-elephant-tools',
+            'title' => $logo_svg . 'Veyra Elephant Tools',
             'href' => '#',
             'meta' => array(
                 'onclick' => 'VeyraElephantTools.openModal(); return false;'
@@ -61,7 +63,8 @@ class Veyra {
         wp_localize_script('veyra-elephant-tools', 'veyra_ajax', array(
             'ajax_url' => admin_url('admin-ajax.php'),
             'nonce' => wp_create_nonce('veyra_elephant_tools'),
-            'current_post_id' => get_queried_object_id()
+            'current_post_id' => get_queried_object_id(),
+            'plugin_url' => VEYRA_PLUGIN_URL
         ));
     }
     

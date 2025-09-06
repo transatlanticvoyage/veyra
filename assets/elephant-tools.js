@@ -20,7 +20,7 @@
             // Create modal
             this.modal = $('<div id="veyra-elephant-modal">' +
                 '<div class="veyra-modal-header">' +
-                    '<h3>Elephant Tools - Edit Post Title</h3>' +
+                    '<h3><img src="' + veyra_ajax.plugin_url + 'assets/images/veyra-sun-logo.svg" style="width: 20px; height: 20px; margin-right: 8px; vertical-align: middle;" alt="Veyra Logo" />Veyra Elephant Tools</h3>' +
                     '<button class="veyra-modal-close">&times;</button>' +
                 '</div>' +
                 '<div class="veyra-modal-body">' +

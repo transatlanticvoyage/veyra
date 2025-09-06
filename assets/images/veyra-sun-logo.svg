@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">
+  <!-- Black background -->
+  <rect width="20" height="20" fill="#000000"/>
+  
+  <!-- White sun -->
+  <g fill="#ffffff">
+    <!-- Sun rays -->
+    <line x1="10" y1="1" x2="10" y2="3" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="10" y1="17" x2="10" y2="19" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="1" y1="10" x2="3" y2="10" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="17" y1="10" x2="19" y2="10" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
+    
+    <!-- Diagonal rays -->
+    <line x1="3.64" y1="3.64" x2="4.95" y2="4.95" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="15.05" y1="15.05" x2="16.36" y2="16.36" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="16.36" y1="3.64" x2="15.05" y2="4.95" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="4.95" y1="15.05" x2="3.64" y2="16.36" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
+    
+    <!-- Sun center circle -->
+    <circle cx="10" cy="10" r="5" fill="#ffffff"/>
+    <circle cx="10" cy="10" r="3" fill="#000000"/>
+    <circle cx="10" cy="10" r="1.5" fill="#ffffff"/>
+  </g>
+</svg>
