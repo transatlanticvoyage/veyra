@@ -32,6 +32,15 @@
                             '<button id="veyra-save-title" class="veyra-btn-save">Save</button>' +
                             '<button id="veyra-cancel" class="veyra-btn-cancel">Cancel</button>' +
                         '</div>' +
+                        '<hr style="margin: 20px 0; border: 0; border-top: 1px solid #ccc;">' +
+                        '<div class="veyra-replex-section">' +
+                            '<span style="display: block; font-size: 16px; font-weight: bold; margin-bottom: 10px;">denyeep column div 2</span>' +
+                            '<hr style="margin: 10px 0; border: 0; border-top: 1px solid #ccc;">' +
+                            '<label for="veyra-replex-content" style="display: block; font-weight: bold; margin-bottom: 5px;">replex_submit_box (replace codes directly only)</label>' +
+                            '<textarea id="veyra-replex-content" placeholder="Enter content with ##codes to replace directly in text" style="width: 100%; height: 150px; font-family: monospace; font-size: 12px; padding: 10px; border: 1px solid #ccc; border-radius: 3px; box-sizing: border-box;"></textarea>' +
+                            '<button type="button" id="veyra-replex-submit-btn" style="margin-top: 10px; background: #0073aa; color: white; border: none; padding: 8px 16px; border-radius: 3px; cursor: pointer; font-size: 14px;">run function_inject_content_5</button>' +
+                            '<div id="veyra-replex-result" style="margin-top: 10px; padding: 10px; border-radius: 4px; display: none;"></div>' +
+                        '</div>' +
                     '</div>' +
                     '<div class="veyra-message"></div>' +
                 '</div>' +
@@ -59,6 +68,11 @@
             // Save button
             $('#veyra-save-title').on('click', function() {
                 self.saveTitle();
+            });
+            
+            // Replex submit button
+            $('#veyra-replex-submit-btn').on('click', function() {
+                self.submitReplexContent();
             });
             
             // Enter key to save
@@ -174,6 +188,68 @@
             
             $('.veyra-loading').hide();
             $('.veyra-content').show();
+        },
+        
+        submitReplexContent: function() {
+            var self = this;
+            var content = $('#veyra-replex-content').val();
+            var $btn = $('#veyra-replex-submit-btn');
+            var $result = $('#veyra-replex-result');
+            
+            if (!content.trim()) {
+                $result.removeClass('veyra-success').addClass('veyra-error').css({
+                    'background': '#f8d7da',
+                    'color': '#721c24',
+                    'border': '1px solid #f5c6cb'
+                });
+                $result.html('<strong>Error:</strong> Please enter content to inject.');
+                $result.show();
+                return;
+            }
+            
+            $btn.prop('disabled', true).text('Processing...');
+            $result.hide();
+            
+            $.ajax({
+                url: veyra_ajax.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'veyra_inject_replex_content',
+                    post_id: veyra_ajax.current_post_id,
+                    replex_content: content,
+                    nonce: veyra_ajax.nonce
+                },
+                success: function(response) {
+                    if (response.success) {
+                        $result.removeClass('veyra-error').addClass('veyra-success').css({
+                            'background': '#d4edda',
+                            'color': '#155724',
+                            'border': '1px solid #c3e6cb'
+                        });
+                        $result.html('<strong>Success:</strong> ' + response.data.message);
+                    } else {
+                        $result.removeClass('veyra-success').addClass('veyra-error').css({
+                            'background': '#f8d7da',
+                            'color': '#721c24',
+                            'border': '1px solid #f5c6cb'
+                        });
+                        $result.html('<strong>Error:</strong> ' + (response.data ? response.data : 'Unknown error occurred'));
+                    }
+                    $result.show();
+                },
+                error: function() {
+                    $result.removeClass('veyra-success').addClass('veyra-error').css({
+                        'background': '#f8d7da',
+                        'color': '#721c24',
+                        'border': '1px solid #f5c6cb'
+                    });
+                    $result.html('<strong>Error:</strong> Failed to inject replex content. Please try again.');
+                    $result.show();
+                },
+                complete: function() {
+                    $btn.prop('disabled', false).text('run function_inject_content_5');
+                }
+            });
         }
     };
     

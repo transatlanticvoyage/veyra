@@ -25,9 +25,11 @@
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
     z-index: 999999;
     display: none;
-    min-width: 400px;
-    max-width: 600px;
+    min-width: 500px;
+    max-width: 700px;
     width: 90%;
+    max-height: 90vh;
+    overflow-y: auto;
 }
 
 /* Modal Header */
@@ -207,4 +209,76 @@
 @keyframes fadeOut {
     from { opacity: 1; }
     to { opacity: 0; }
+}
+
+/* Replex Section Styling */
+.veyra-replex-section {
+    border: 1px solid black;
+    padding: 10px;
+    margin-top: 10px;
+}
+
+.veyra-replex-section span {
+    display: block;
+    font-size: 16px;
+    font-weight: bold;
+    margin-bottom: 10px;
+}
+
+.veyra-replex-section label {
+    display: block;
+    font-weight: bold;
+    margin-bottom: 5px;
+}
+
+#veyra-replex-content {
+    width: 100%;
+    height: 150px;
+    font-family: monospace;
+    font-size: 12px;
+    padding: 10px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    box-sizing: border-box;
+    resize: vertical;
+}
+
+#veyra-replex-submit-btn {
+    margin-top: 10px;
+    background: #0073aa;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background-color 0.2s;
+}
+
+#veyra-replex-submit-btn:hover:not(:disabled) {
+    background: #005a87;
+}
+
+#veyra-replex-submit-btn:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+}
+
+#veyra-replex-result {
+    margin-top: 10px;
+    padding: 10px;
+    border-radius: 4px;
+    display: none;
+}
+
+.veyra-success {
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+}
+
+.veyra-error {
+    background: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
 }
