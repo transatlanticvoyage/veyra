@@ -1,8 +1,8 @@
 <?php
 /**
- * Plugin Name: Veyra (Elementor-Safe v1.2)
+ * Plugin Name: Veyra
  * Plugin URI: https://github.com/transatlanticvoyage/veyra
- * Description: Veyra - WordPress plugin for zen data management with Elephant Tools - Works with or without Elementor
+ * Description: Veyra WordPress plugin.
  * Version: 1.2.0
  * Author: Veyra Team
  * License: GPL v2 or later
@@ -28,6 +28,7 @@ class Veyra {
         $this->elementor_available = $this->is_elementor_available();
         
         add_action('init', array($this, 'init'));
+        add_action('admin_menu', array($this, 'add_admin_menu'));
         add_action('admin_bar_menu', array($this, 'add_elephant_tools_to_admin_bar'), 100);
         add_action('wp_enqueue_scripts', array($this, 'enqueue_scripts'));
         add_action('admin_enqueue_scripts', array($this, 'enqueue_scripts'));
@@ -38,6 +39,17 @@ class Veyra {
         // Add fallback AJAX action for non-Elementor mode
         if (!$this->elementor_available) {
             add_action('wp_ajax_veyra_inject_shortcode_content', array($this, 'ajax_inject_shortcode_content'));
+        }
+
+        // Handle admin option saves
+        add_action('admin_post_veyra_save_options', array($this, 'save_options'));
+
+        // Show full post on blog feed pages if option is enabled
+        if (get_option('veyra_show_full_post_on_blog_feed_pages', false)) {
+            add_filter('pre_option_rss_use_excerpt', function() { return '0'; });
+            add_filter('the_content_more_link', '__return_empty_string');
+            add_filter('the_excerpt', array($this, 'replace_excerpt_with_content'));
+            add_filter('get_the_excerpt', array($this, 'replace_excerpt_with_content_filter'), 10, 2);
         }
     }
     
@@ -102,6 +114,83 @@ class Veyra {
         return $content;
     }
     
+    public function add_admin_menu() {
+        add_menu_page(
+            'Veyra Hub 1',
+            'Veyra Hub 1',
+            'edit_posts',
+            'veyra-hub-1',
+            array($this, 'render_hub_page'),
+            'dashicons-sun',
+            21
+        );
+    }
+
+    public function save_options() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Unauthorized');
+        }
+        check_admin_referer('veyra_save_options', 'veyra_options_nonce');
+
+        $show_full = isset($_POST['veyra_show_full_post_on_blog_feed_pages']) ? true : false;
+        update_option('veyra_show_full_post_on_blog_feed_pages', $show_full);
+
+        wp_redirect(admin_url('admin.php?page=veyra-hub-1&saved=1'));
+        exit;
+    }
+
+    public function replace_excerpt_with_content($excerpt) {
+        if (is_home() || is_archive() || is_search()) {
+            global $post;
+            if ($post) {
+                return apply_filters('the_content', $post->post_content);
+            }
+        }
+        return $excerpt;
+    }
+
+    public function replace_excerpt_with_content_filter($excerpt, $post) {
+        if (is_home() || is_archive() || is_search()) {
+            if ($post) {
+                return apply_filters('the_content', $post->post_content);
+            }
+        }
+        return $excerpt;
+    }
+
+    public function render_hub_page() {
+        $show_full = get_option('veyra_show_full_post_on_blog_feed_pages', false);
+        $saved = isset($_GET['saved']) ? true : false;
+        ?>
+        <div class="wrap">
+            <h1>Veyra Hub 1</h1>
+
+            <?php if ($saved): ?>
+                <div class="notice notice-success is-dismissible"><p>Settings saved.</p></div>
+            <?php endif; ?>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <input type="hidden" name="action" value="veyra_save_options" />
+                <?php wp_nonce_field('veyra_save_options', 'veyra_options_nonce'); ?>
+
+                <table class="form-table">
+                    <tr>
+                        <th scope="row">veyra_show_full_post_on_blog_feed_pages</th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="veyra_show_full_post_on_blog_feed_pages" value="1" <?php checked($show_full); ?> />
+                                When enabled, blog feed pages (home, archive, search) display the full post content instead of excerpts.
+                            </label>
+                        </td>
+                    </tr>
+                </table>
+
+                <?php submit_button('Save Settings'); ?>
+            </form>
+        </div>
+        <?php
+    }
+
     public function add_elephant_tools_to_admin_bar($wp_admin_bar) {
         if (!is_user_logged_in() || !current_user_can('edit_posts')) {
             return;
