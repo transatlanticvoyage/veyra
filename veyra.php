@@ -8,6 +8,8 @@
  * License: GPL v2 or later
  */
 
+// test comment - veyra now lives on lagoon site
+
 // Prevent direct access
 if (!defined('ABSPATH')) {
     exit;
