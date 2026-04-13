@@ -53,6 +53,11 @@ class Veyra {
             add_filter('the_excerpt', array($this, 'replace_excerpt_with_content'));
             add_filter('get_the_excerpt', array($this, 'replace_excerpt_with_content_filter'), 10, 2);
         }
+
+        // Brindle content: inject custom HTML at top of blog feed page 1 only
+        if (get_option('veyra_show_brindle_content_on_blog_feed_page', false)) {
+            add_action('loop_start', array($this, 'inject_brindle_content'));
+        }
     }
     
     /**
@@ -137,8 +142,52 @@ class Veyra {
         $show_full = isset($_POST['veyra_show_full_post_on_blog_feed_pages']) ? true : false;
         update_option('veyra_show_full_post_on_blog_feed_pages', $show_full);
 
+        $show_brindle = isset($_POST['veyra_show_brindle_content_on_blog_feed_page']) ? true : false;
+        update_option('veyra_show_brindle_content_on_blog_feed_page', $show_brindle);
+
+        $brindle_content = isset($_POST['veyra_brindle_content']) ? wp_kses_post($_POST['veyra_brindle_content']) : '';
+        update_option('veyra_brindle_content', $brindle_content);
+
+        $hauser_emblem = isset($_POST['veyra_hauser_themes_header_emblem_text']) ? sanitize_text_field($_POST['veyra_hauser_themes_header_emblem_text']) : '';
+        update_option('veyra_hauser_themes_header_emblem_text', $hauser_emblem);
+
+        // Save WP native reading options
+        if (isset($_POST['show_on_front'])) {
+            update_option('show_on_front', sanitize_text_field($_POST['show_on_front']));
+        }
+        if (isset($_POST['page_on_front'])) {
+            update_option('page_on_front', intval($_POST['page_on_front']));
+        }
+        if (isset($_POST['page_for_posts'])) {
+            update_option('page_for_posts', intval($_POST['page_for_posts']));
+        }
+        if (isset($_POST['posts_per_page'])) {
+            update_option('posts_per_page', intval($_POST['posts_per_page']));
+        }
+        if (isset($_POST['posts_per_rss'])) {
+            update_option('posts_per_rss', intval($_POST['posts_per_rss']));
+        }
+        if (isset($_POST['rss_use_excerpt'])) {
+            update_option('rss_use_excerpt', intval($_POST['rss_use_excerpt']));
+        }
+        if (isset($_POST['blog_public'])) {
+            update_option('blog_public', intval($_POST['blog_public']));
+        } else {
+            update_option('blog_public', 1);
+        }
+
         wp_redirect(admin_url('admin.php?page=veyra-hub-1&saved=1'));
         exit;
+    }
+
+    public function inject_brindle_content($query) {
+        if (!$query->is_main_query() || !is_home() || is_paged()) {
+            return;
+        }
+        $content = get_option('veyra_brindle_content', '');
+        if (!empty($content)) {
+            echo '<div class="veyra-brindle-content">' . $content . '</div>';
+        }
     }
 
     public function replace_excerpt_with_content($excerpt) {
@@ -162,7 +211,20 @@ class Veyra {
 
     public function render_hub_page() {
         $show_full = get_option('veyra_show_full_post_on_blog_feed_pages', false);
+        $show_brindle = get_option('veyra_show_brindle_content_on_blog_feed_page', false);
+        $brindle_content = get_option('veyra_brindle_content', '');
+        $hauser_emblem = get_option('veyra_hauser_themes_header_emblem_text', '');
         $saved = isset($_GET['saved']) ? true : false;
+
+        // WP native reading options
+        $show_on_front = get_option('show_on_front', 'posts');
+        $page_on_front = get_option('page_on_front', 0);
+        $page_for_posts = get_option('page_for_posts', 0);
+        $posts_per_page = get_option('posts_per_page', 10);
+        $posts_per_rss = get_option('posts_per_rss', 10);
+        $rss_use_excerpt = get_option('rss_use_excerpt', 0);
+        $blog_public = get_option('blog_public', 1);
+        $pages = get_pages();
         ?>
         <div class="wrap">
             <h1>Veyra Hub 1</h1>
@@ -177,12 +239,140 @@ class Veyra {
 
                 <table class="form-table">
                     <tr>
+                        <th scope="row">veyra_hauser_themes_header_emblem_text</th>
+                        <td>
+                            <input type="text" name="veyra_hauser_themes_header_emblem_text" value="<?php echo esc_attr($hauser_emblem); ?>" class="regular-text" />
+                            <p class="description">Site title text displayed in theme headers. If empty, no title is shown.</p>
+                        </td>
+                    </tr>
+                    <tr>
                         <th scope="row">veyra_show_full_post_on_blog_feed_pages</th>
                         <td>
                             <label>
                                 <input type="checkbox" name="veyra_show_full_post_on_blog_feed_pages" value="1" <?php checked($show_full); ?> />
                                 When enabled, blog feed pages (home, archive, search) display the full post content instead of excerpts.
                             </label>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">veyra_show_brindle_content_on_blog_feed_page</th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="veyra_show_brindle_content_on_blog_feed_page" value="1" <?php checked($show_brindle); ?> />
+                                When enabled, displays brindle content at the top of the blog feed page (page 1 only, not paginated pages).
+                            </label>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">veyra_brindle_content</th>
+                        <td>
+                            <textarea name="veyra_brindle_content" rows="12" cols="80" class="large-text code"><?php echo esc_textarea($brindle_content); ?></textarea>
+                            <p class="description">HTML content to display at the top of the blog feed page (before posts). Only shown on page 1.</p>
+                        </td>
+                    </tr>
+                </table>
+
+                <hr style="margin: 30px 0;" />
+
+                <h2>WP Native Options</h2>
+
+                <table class="form-table">
+                    <tr>
+                        <th scope="row">WP Native - Site Title</th>
+                        <td>
+                            <code><?php echo esc_html(get_option('blogname', '')); ?></code>
+                            <p class="description">Set via <a href="<?php echo esc_url(admin_url('options-general.php')); ?>">Settings &rarr; General</a></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">WP Native - Site Description</th>
+                        <td>
+                            <code><?php echo esc_html(get_option('blogdescription', '')); ?></code>
+                            <p class="description">Set via <a href="<?php echo esc_url(admin_url('options-general.php')); ?>">Settings &rarr; General</a></p>
+                        </td>
+                    </tr>
+                </table>
+
+                <hr style="margin: 30px 0;" />
+
+                <h2>From WP Native Reading Page</h2>
+                <h3>Reading Settings</h3>
+
+                <table class="form-table">
+                    <tr>
+                        <th scope="row">Your homepage displays</th>
+                        <td>
+                            <fieldset>
+                                <label>
+                                    <input type="radio" name="show_on_front" value="posts" <?php checked($show_on_front, 'posts'); ?> />
+                                    Your latest posts
+                                </label>
+                                <br />
+                                <label>
+                                    <input type="radio" name="show_on_front" value="page" <?php checked($show_on_front, 'page'); ?> />
+                                    A static page (select below)
+                                </label>
+                                <ul style="margin-left: 25px;">
+                                    <li>
+                                        <label for="page_on_front">Homepage:
+                                            <select name="page_on_front" id="page_on_front">
+                                                <option value="0">&mdash; Select &mdash;</option>
+                                                <?php foreach ($pages as $p): ?>
+                                                    <option value="<?php echo $p->ID; ?>" <?php selected($page_on_front, $p->ID); ?>><?php echo esc_html($p->post_title); ?></option>
+                                                <?php endforeach; ?>
+                                            </select>
+                                        </label>
+                                    </li>
+                                    <li>
+                                        <label for="page_for_posts">Posts page:
+                                            <select name="page_for_posts" id="page_for_posts">
+                                                <option value="0">&mdash; Select &mdash;</option>
+                                                <?php foreach ($pages as $p): ?>
+                                                    <option value="<?php echo $p->ID; ?>" <?php selected($page_for_posts, $p->ID); ?>><?php echo esc_html($p->post_title); ?></option>
+                                                <?php endforeach; ?>
+                                            </select>
+                                        </label>
+                                    </li>
+                                </ul>
+                            </fieldset>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="posts_per_page">Blog pages show at most</label></th>
+                        <td>
+                            <input name="posts_per_page" type="number" step="1" min="1" id="posts_per_page" value="<?php echo esc_attr($posts_per_page); ?>" class="small-text" /> posts
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="posts_per_rss">Syndication feeds show the most recent</label></th>
+                        <td>
+                            <input name="posts_per_rss" type="number" step="1" min="1" id="posts_per_rss" value="<?php echo esc_attr($posts_per_rss); ?>" class="small-text" /> items
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">For each post in a feed, include</th>
+                        <td>
+                            <fieldset>
+                                <label>
+                                    <input type="radio" name="rss_use_excerpt" value="0" <?php checked($rss_use_excerpt, 0); ?> />
+                                    Full text
+                                </label>
+                                <br />
+                                <label>
+                                    <input type="radio" name="rss_use_excerpt" value="1" <?php checked($rss_use_excerpt, 1); ?> />
+                                    Excerpt
+                                </label>
+                            </fieldset>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Search engine visibility</th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="blog_public" value="0" <?php checked($blog_public, 0); ?> />
+                                Discourage search engines from indexing this site
+                            </label>
+                            <p class="description">It is up to search engines to honor this request.</p>
                         </td>
                     </tr>
                 </table>
