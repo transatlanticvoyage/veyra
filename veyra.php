@@ -54,9 +54,9 @@ class Veyra {
             add_filter('get_the_excerpt', array($this, 'replace_excerpt_with_content_filter'), 10, 2);
         }
 
-        // Brindle content: inject custom HTML at top of blog feed page 1 only
-        if (get_option('veyra_show_brindle_content_on_blog_feed_page', false)) {
-            add_action('loop_start', array($this, 'inject_brindle_content'));
+        // Fossil content: inject custom HTML at top of blog feed page 1 only
+        if (get_option('veyra_show_fossil_content_on_blog_feed_page', false)) {
+            add_action('loop_start', array($this, 'inject_fossil_content'));
         }
     }
     
@@ -142,11 +142,11 @@ class Veyra {
         $show_full = isset($_POST['veyra_show_full_post_on_blog_feed_pages']) ? true : false;
         update_option('veyra_show_full_post_on_blog_feed_pages', $show_full);
 
-        $show_brindle = isset($_POST['veyra_show_brindle_content_on_blog_feed_page']) ? true : false;
-        update_option('veyra_show_brindle_content_on_blog_feed_page', $show_brindle);
+        $show_fossil = isset($_POST['veyra_show_fossil_content_on_blog_feed_page']) ? true : false;
+        update_option('veyra_show_fossil_content_on_blog_feed_page', $show_fossil);
 
-        $brindle_content = isset($_POST['veyra_brindle_content']) ? wp_kses_post($_POST['veyra_brindle_content']) : '';
-        update_option('veyra_brindle_content', $brindle_content);
+        $fossil_content = isset($_POST['veyra_fossil_content']) ? wp_kses_post(wp_unslash($_POST['veyra_fossil_content'])) : '';
+        update_option('veyra_fossil_content', $fossil_content);
 
         $hauser_emblem = isset($_POST['veyra_hauser_themes_header_emblem_text']) ? sanitize_text_field($_POST['veyra_hauser_themes_header_emblem_text']) : '';
         update_option('veyra_hauser_themes_header_emblem_text', $hauser_emblem);
@@ -180,13 +180,13 @@ class Veyra {
         exit;
     }
 
-    public function inject_brindle_content($query) {
+    public function inject_fossil_content($query) {
         if (!$query->is_main_query() || !is_home() || is_paged()) {
             return;
         }
-        $content = get_option('veyra_brindle_content', '');
+        $content = get_option('veyra_fossil_content', '');
         if (!empty($content)) {
-            echo '<div class="veyra-brindle-content">' . $content . '</div>';
+            echo '<div class="veyra-fossil-content">' . wpautop($content) . '</div>';
         }
     }
 
@@ -211,8 +211,8 @@ class Veyra {
 
     public function render_hub_page() {
         $show_full = get_option('veyra_show_full_post_on_blog_feed_pages', false);
-        $show_brindle = get_option('veyra_show_brindle_content_on_blog_feed_page', false);
-        $brindle_content = get_option('veyra_brindle_content', '');
+        $show_fossil = get_option('veyra_show_fossil_content_on_blog_feed_page', false);
+        $fossil_content = get_option('veyra_fossil_content', '');
         $hauser_emblem = get_option('veyra_hauser_themes_header_emblem_text', '');
         $saved = isset($_GET['saved']) ? true : false;
 
@@ -255,19 +255,19 @@ class Veyra {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row">veyra_show_brindle_content_on_blog_feed_page</th>
+                        <th scope="row">veyra_show_fossil_content_on_blog_feed_page</th>
                         <td>
                             <label>
-                                <input type="checkbox" name="veyra_show_brindle_content_on_blog_feed_page" value="1" <?php checked($show_brindle); ?> />
-                                When enabled, displays brindle content at the top of the blog feed page (page 1 only, not paginated pages).
+                                <input type="checkbox" name="veyra_show_fossil_content_on_blog_feed_page" value="1" <?php checked($show_fossil); ?> />
+                                When enabled, displays fossil content at the top of the blog feed page (page 1 only, not paginated pages).
                             </label>
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row">veyra_brindle_content</th>
+                        <th scope="row">veyra_fossil_content</th>
                         <td>
-                            <textarea name="veyra_brindle_content" rows="12" cols="80" class="large-text code"><?php echo esc_textarea($brindle_content); ?></textarea>
-                            <p class="description">HTML content to display at the top of the blog feed page (before posts). Only shown on page 1.</p>
+                            <textarea name="veyra_fossil_content" rows="12" cols="80" class="large-text code"><?php echo esc_textarea($fossil_content); ?></textarea>
+                            <p class="description">HTML content to display at the top of the blog feed page (before posts). Only shown on page 1. Line breaks are automatically converted to paragraphs.</p>
                         </td>
                     </tr>
                 </table>
