@@ -186,6 +186,7 @@ class Veyra {
         }
         $content = get_option('veyra_fossil_content', '');
         if (!empty($content)) {
+            $content = wp_unslash($content);
             echo '<div class="veyra-fossil-content">' . wpautop($content) . '</div>';
         }
     }
