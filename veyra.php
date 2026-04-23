@@ -815,3 +815,9 @@ class Veyra {
 
 // Start the plugin
 new Veyra();
+
+// ---------------------------------------------------------------------------
+// Admin screens — each under /admin-screens/<folder>/ self-registers its menu
+// and render callback. Keeps page-specific code out of this main file.
+// ---------------------------------------------------------------------------
+require_once VEYRA_PLUGIN_PATH . 'admin-screens/post_importer_from_birch/post-importer-from-birch.php';
