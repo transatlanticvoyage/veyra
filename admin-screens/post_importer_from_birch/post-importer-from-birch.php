@@ -128,6 +128,7 @@ function veyra_post_importer_handle_submit() {
 
     $post_type   = (isset($_POST['veyra_post_type']) && $_POST['veyra_post_type'] === 'page') ? 'page' : 'post';
     $post_status = (isset($_POST['veyra_post_status']) && $_POST['veyra_post_status'] === 'publish') ? 'publish' : 'draft';
+    $image_style = (isset($_POST['veyra_image_display']) && $_POST['veyra_image_display'] === 'wp_medium') ? 'wp_medium' : 'plain';
 
     $tmp_zip = $_FILES['veyra_pack']['tmp_name'];
 
@@ -151,9 +152,12 @@ function veyra_post_importer_handle_submit() {
         return ['level' => 'error', 'message' => 'article.txt is missing both title and content sections.'];
     }
 
-    // Extract images to WP uploads + collect URLs
+    // Extract images to WP uploads + register as media-library attachments.
+    // We keep the attachment ID (not just the URL) so we can emit native-looking
+    // <img> tags via wp_get_attachment_image() with the "medium" size — matches
+    // what the WP media-library popup inserts.
     $upload_dir = wp_upload_dir();
-    $image_urls = [];
+    $image_assets = []; // each entry: ['id' => int|null, 'url' => string, 'alt' => string]
     $image_exts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif'];
     for ($i = 0; $i < $zip->numFiles; $i++) {
         $entry_name = $zip->getNameIndex($i);
@@ -165,25 +169,36 @@ function veyra_post_importer_handle_submit() {
         $filename = wp_unique_filename($upload_dir['path'], basename($entry_name));
         $dest = trailingslashit($upload_dir['path']) . $filename;
         if (file_put_contents($dest, $data) === false) continue;
-        $url = trailingslashit($upload_dir['url']) . $filename;
+        $full_url = trailingslashit($upload_dir['url']) . $filename;
 
-        // Register as WP attachment so it appears in Media Library
+        // Derive alt text from filename (hyphens + underscores → spaces)
+        $alt_text = str_replace(['-', '_'], ' ', pathinfo($filename, PATHINFO_FILENAME));
+
+        // Register as WP attachment so it appears in Media Library + has sized derivatives
         $attach_id = wp_insert_attachment([
             'post_title'     => pathinfo($filename, PATHINFO_FILENAME),
             'post_mime_type' => wp_check_filetype($filename)['type'] ?: 'image/' . $ext,
             'post_status'    => 'inherit',
+            'post_excerpt'   => $alt_text, // caption
+            'post_content'   => '',        // description
         ], $dest);
         if (!is_wp_error($attach_id) && $attach_id) {
             require_once ABSPATH . 'wp-admin/includes/image.php';
             $metadata = wp_generate_attachment_metadata($attach_id, $dest);
             wp_update_attachment_metadata($attach_id, $metadata);
+            // Set the alt text on the attachment record — required for
+            // wp_get_attachment_image() to emit alt="..." natively.
+            update_post_meta($attach_id, '_wp_attachment_image_alt', $alt_text);
+            $image_assets[] = ['id' => (int) $attach_id, 'url' => $full_url, 'alt' => $alt_text];
+        } else {
+            // Fallback: attachment registration failed → still embed raw URL
+            $image_assets[] = ['id' => null, 'url' => $full_url, 'alt' => $alt_text];
         }
-        $image_urls[] = $url;
     }
     $zip->close();
 
     // Insert images into content at safe positions
-    $content_with_images = veyra_post_importer_insert_images($parsed['page_content'], $image_urls);
+    $content_with_images = veyra_post_importer_insert_images($parsed['page_content'], $image_assets, $image_style);
 
     // Build post
     $postarr = [
@@ -215,7 +230,7 @@ function veyra_post_importer_handle_submit() {
             $post_type,
             $post_id,
             $post_status,
-            count($image_urls)
+            count($image_assets)
         ),
         'edit_url' => $edit_url,
         'view_url' => $view_url,
@@ -257,10 +272,14 @@ function veyra_post_importer_parse_article_txt($raw) {
  * Content in our system is usually a mix of bare-text paragraphs separated
  * by blank lines, plus occasional <h2>/<h3> tags and inline anchors.
  */
-function veyra_post_importer_insert_images($content, array $image_urls) {
-    if (empty($image_urls)) return $content;
+function veyra_post_importer_insert_images($content, array $image_assets, $style = 'plain') {
+    if (empty($image_assets)) return $content;
     if ($content === '') {
-        return implode("\n\n", array_map('veyra_post_importer_format_image_block', $image_urls));
+        $out = [];
+        foreach ($image_assets as $asset) {
+            $out[] = veyra_post_importer_format_image_block($asset, $style);
+        }
+        return implode("\n\n", $out);
     }
 
     // Split on blank lines into "segments" (paragraphs, headings, or inline blocks)
@@ -283,21 +302,21 @@ function veyra_post_importer_insert_images($content, array $image_urls) {
     if (empty($candidate_indexes)) {
         // Fallback: no safe positions — just append all images at the end
         $appended = $content;
-        foreach ($image_urls as $u) {
-            $appended .= "\n\n" . veyra_post_importer_format_image_block($u);
+        foreach ($image_assets as $asset) {
+            $appended .= "\n\n" . veyra_post_importer_format_image_block($asset, $style);
         }
         return $appended;
     }
 
     // Shuffle candidate indexes and take the first N (or fewer if not enough)
     shuffle($candidate_indexes);
-    $take = array_slice($candidate_indexes, 0, count($image_urls));
+    $take = array_slice($candidate_indexes, 0, count($image_assets));
     sort($take);
 
     // Pair images with indexes in order
     $img_by_idx = [];
     foreach ($take as $n => $idx) {
-        if (isset($image_urls[$n])) $img_by_idx[$idx] = $image_urls[$n];
+        if (isset($image_assets[$n])) $img_by_idx[$idx] = $image_assets[$n];
     }
 
     // Rebuild the segment list with image blocks inserted after chosen indexes
@@ -305,24 +324,54 @@ function veyra_post_importer_insert_images($content, array $image_urls) {
     foreach ($segments as $i => $seg) {
         $rebuilt[] = $seg;
         if (isset($img_by_idx[$i])) {
-            $rebuilt[] = veyra_post_importer_format_image_block($img_by_idx[$i]);
+            $rebuilt[] = veyra_post_importer_format_image_block($img_by_idx[$i], $style);
         }
     }
 
     // Any images that didn't get a position → append at end
     $used = count($take);
-    $remaining = array_slice($image_urls, $used);
-    foreach ($remaining as $u) {
-        $rebuilt[] = veyra_post_importer_format_image_block($u);
+    $remaining = array_slice($image_assets, $used);
+    foreach ($remaining as $asset) {
+        $rebuilt[] = veyra_post_importer_format_image_block($asset, $style);
     }
 
     // Join with blank-line separators — guarantees visual spacing in code view
     return implode("\n\n", $rebuilt);
 }
 
-function veyra_post_importer_format_image_block($url) {
-    $alt = pathinfo(parse_url($url, PHP_URL_PATH) ?: $url, PATHINFO_FILENAME);
-    $alt = str_replace(['-', '_'], ' ', $alt);
+/**
+ * Emit an <img> block for a single image asset.
+ *
+ * $asset shape: ['id' => int|null, 'url' => string, 'alt' => string]
+ * $style:
+ *   - 'plain'         → hand-rolled <img src alt /> using the full-size URL (default)
+ *   - 'wp_medium'     → native WP markup via wp_get_attachment_image() at the
+ *                       "medium" size, with alignnone + size-medium + wp-image-{ID}
+ *                       classes — matches what the WP media-library popup
+ *                       inserts when user picks "Medium" size.
+ */
+function veyra_post_importer_format_image_block($asset, $style = 'plain') {
+    $url = isset($asset['url']) ? $asset['url'] : '';
+    $alt = isset($asset['alt']) ? $asset['alt'] : '';
+    $id  = isset($asset['id'])  ? $asset['id']  : null;
+
+    if ($style === 'wp_medium' && $id && function_exists('wp_get_attachment_image')) {
+        // wp_get_attachment_image auto-adds 'wp-image-{ID}' class + width/height
+        // attrs + srcset/sizes when applicable. We add 'alignnone size-medium'
+        // to mirror what the native media-library popup generates on insert.
+        $html = wp_get_attachment_image(
+            $id,
+            'medium',
+            false,
+            ['class' => 'alignnone size-medium wp-image-' . (int) $id]
+        );
+        if (is_string($html) && $html !== '') {
+            return $html;
+        }
+        // Fall through to plain if WP returned empty for some reason
+    }
+
+    // Plain / fallback behavior (original system)
     return '<img src="' . esc_url($url) . '" alt="' . esc_attr($alt) . '" />';
 }
 
@@ -376,6 +425,22 @@ function veyra_post_importer_render_page() {
                 <label>
                     <input type="radio" name="veyra_post_status" value="publish" /> publish
                 </label>
+            </fieldset>
+
+            <fieldset style="margin-bottom: 16px;">
+                <legend style="font-weight: 600; margin-bottom: 6px;">IMAGE DISPLAY OPTIONS</legend>
+                <label style="display: block; margin-bottom: 4px;">
+                    <input type="radio" name="veyra_image_display" value="plain" checked />
+                    nothing special (default - current system)
+                </label>
+                <label style="display: block;">
+                    <input type="radio" name="veyra_image_display" value="wp_medium" />
+                    use medium wp native settings
+                </label>
+                <p style="color: #666; font-size: 12px; margin-top: 4px;">
+                    <code>nothing special</code> = <code>&lt;img src alt /&gt;</code> using the full-size URL.<br>
+                    <code>use medium wp native settings</code> = emits via <code>wp_get_attachment_image($id, 'medium', …)</code> with <code>class="alignnone size-medium wp-image-{ID}"</code> + explicit width/height — identical to what the WP media-library popup generates when you pick "Medium".
+                </p>
             </fieldset>
 
             <fieldset style="margin-bottom: 20px;">
