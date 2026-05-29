@@ -9,6 +9,7 @@
  */
 
 // test comment - veyra now lives on lagoon site
+// Test comment: VSCode source control sync test - 2026-05-28
 
 // Prevent direct access
 if (!defined('ABSPATH')) {
