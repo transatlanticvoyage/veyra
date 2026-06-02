@@ -171,12 +171,12 @@ function veyra_post_importer_handle_submit() {
         if (file_put_contents($dest, $data) === false) continue;
         $full_url = trailingslashit($upload_dir['url']) . $filename;
 
-        // Derive alt text from filename (hyphens + underscores → spaces)
-        $alt_text = str_replace(['-', '_'], ' ', pathinfo($filename, PATHINFO_FILENAME));
+        // Derive alt text + title from filename: separators → spaces, strip leading/trailing numbers.
+        $alt_text = veyra_post_importer_derive_image_label(pathinfo($filename, PATHINFO_FILENAME));
 
         // Register as WP attachment so it appears in Media Library + has sized derivatives
         $attach_id = wp_insert_attachment([
-            'post_title'     => pathinfo($filename, PATHINFO_FILENAME),
+            'post_title'     => $alt_text,
             'post_mime_type' => wp_check_filetype($filename)['type'] ?: 'image/' . $ext,
             'post_status'    => 'inherit',
             'post_excerpt'   => $alt_text, // caption
@@ -235,6 +235,36 @@ function veyra_post_importer_handle_submit() {
         'edit_url' => $edit_url,
         'view_url' => $view_url,
     ];
+}
+
+/**
+ * Convert an image filename stem into a clean human label used as both the
+ * attachment post_title and the alt/caption text.
+ *
+ * Rules:
+ *   1. Replace hyphens and underscores with spaces.
+ *   2. Strip any leading tokens that are purely numeric digits.
+ *   3. Strip any trailing tokens that are purely numeric digits.
+ *
+ * Examples:
+ *   ac_repair_hub          → "ac repair hub"
+ *   ac-repair-hub          → "ac repair hub"
+ *   123_ac_repair_hub      → "ac repair hub"
+ *   ac_repair_hub_184      → "ac repair hub"
+ *   123_ac_repair_hub_184  → "ac repair hub"
+ */
+function veyra_post_importer_derive_image_label($filename_stem) {
+    $label  = str_replace(['-', '_'], ' ', $filename_stem);
+    $tokens = explode(' ', $label);
+    // Strip leading purely-numeric tokens
+    while (!empty($tokens) && ctype_digit($tokens[0])) {
+        array_shift($tokens);
+    }
+    // Strip trailing purely-numeric tokens
+    while (!empty($tokens) && ctype_digit((string) end($tokens))) {
+        array_pop($tokens);
+    }
+    return trim(implode(' ', $tokens));
 }
 
 /**
