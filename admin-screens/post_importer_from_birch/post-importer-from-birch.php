@@ -197,17 +197,66 @@ function veyra_post_importer_handle_submit() {
     }
     $zip->close();
 
-    // Insert images into content at safe positions
-    $content_with_images = veyra_post_importer_insert_images($parsed['page_content'], $image_assets, $image_style);
+    // Upsert: update an existing post if one is already associated with this backlink_id,
+    // otherwise create a new one. (Stores tregnar_associated_linksharn_backlink_id meta.)
+    $res = veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style);
+    if (!empty($res['error'])) {
+        return ['level' => 'error', 'message' => $res['error']];
+    }
+    return [
+        'level'    => 'success',
+        'message'  => sprintf(
+            '%1$s %2$s (ID %3$d, status: %4$s). Images embedded: %5$d.%6$s',
+            $res['updated'] ? 'Updated existing' : 'Created',
+            $post_type,
+            $res['post_id'],
+            $post_status,
+            $res['images'],
+            $res['backlink_id'] !== '' ? ' [backlink_id ' . $res['backlink_id'] . ']' : ''
+        ),
+        'edit_url' => $res['edit_url'],
+        'view_url' => $res['view_url'],
+    ];
+}
 
-    // Build post
+/**
+ * Find an existing post associated with a linksharn backlink_id via post meta.
+ * Returns post ID (int) or 0 if none.
+ */
+function veyra_post_importer_find_post_by_backlink_id($backlink_id) {
+    $backlink_id = trim((string) $backlink_id);
+    if ($backlink_id === '') return 0;
+    $ids = get_posts([
+        'post_type'   => 'any',
+        'post_status' => 'any',
+        'numberposts' => 1,
+        'fields'      => 'ids',
+        'meta_key'    => 'tregnar_associated_linksharn_backlink_id',
+        'meta_value'  => $backlink_id,
+    ]);
+    return !empty($ids) ? (int) $ids[0] : 0;
+}
+
+/**
+ * Create or update a WP post from a parsed article + extracted images.
+ * If a post already carries the tregnar_associated_linksharn_backlink_id meta matching
+ * $parsed['linksharn_backlink_id'], that post is UPDATED (title, content, date) and its
+ * permalink is re-rendered (post_name regenerated from the new title). Otherwise a new
+ * post is created. The association meta is always (re)written.
+ */
+function veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style) {
+    $content_with_images = veyra_post_importer_insert_images($parsed['page_content'], $image_assets, $image_style);
+    $title       = $parsed['page_title'] ?: 'Birch Import (' . current_time('Y-m-d H:i') . ')';
+    $backlink_id = isset($parsed['linksharn_backlink_id']) ? trim($parsed['linksharn_backlink_id']) : '';
+
+    $existing_id = veyra_post_importer_find_post_by_backlink_id($backlink_id);
+
     $postarr = [
         'post_type'    => $post_type,
         'post_status'  => $post_status,
-        'post_title'   => $parsed['page_title'] ?: 'Birch Import (' . current_time('Y-m-d H:i') . ')',
+        'post_title'   => $title,
         'post_content' => $content_with_images,
     ];
-    // Only override post_date if the frontend date parses cleanly; otherwise let WP use now()
     if (!empty($parsed['birch_frontend_date'])) {
         $ts = strtotime($parsed['birch_frontend_date']);
         if ($ts !== false) {
@@ -216,24 +265,156 @@ function veyra_post_importer_handle_submit() {
         }
     }
 
-    $post_id = wp_insert_post($postarr, true);
+    if ($existing_id) {
+        $postarr['ID']        = $existing_id;
+        $postarr['post_name'] = sanitize_title($title); // re-render permalink to match new title
+        $post_id  = wp_update_post($postarr, true);
+        $updated  = true;
+    } else {
+        $post_id  = wp_insert_post($postarr, true);
+        $updated  = false;
+    }
     if (is_wp_error($post_id)) {
-        return ['level' => 'error', 'message' => 'wp_insert_post failed: ' . $post_id->get_error_message()];
+        return ['error' => ($updated ? 'wp_update_post' : 'wp_insert_post') . ' failed: ' . $post_id->get_error_message()];
     }
 
-    $edit_url = get_edit_post_link($post_id, '');
-    $view_url = get_permalink($post_id);
+    if ($backlink_id !== '') {
+        update_post_meta($post_id, 'tregnar_associated_linksharn_backlink_id', $backlink_id);
+    }
+
     return [
-        'level'    => 'success',
-        'message'  => sprintf(
-            'Created %1$s (ID %2$d, status: %3$s). Images embedded: %4$d.',
-            $post_type,
-            $post_id,
-            $post_status,
-            count($image_assets)
-        ),
-        'edit_url' => $edit_url,
-        'view_url' => $view_url,
+        'post_id'     => (int) $post_id,
+        'updated'     => $updated,
+        'title'       => $title,
+        'backlink_id' => $backlink_id,
+        'images'      => count($image_assets),
+        'edit_url'    => get_edit_post_link($post_id, ''),
+        'view_url'    => get_permalink($post_id),
+    ];
+}
+
+/**
+ * Extract a set of zip image entries into WP uploads + register as media-library
+ * attachments. $entry_names = array of exact zip entry names (image files only).
+ * Returns array of ['id'=>int|null, 'url'=>string, 'alt'=>string].
+ */
+function veyra_post_importer_extract_zip_images($zip, array $entry_names) {
+    $upload_dir   = wp_upload_dir();
+    $image_assets = [];
+    $image_exts   = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif'];
+    foreach ($entry_names as $entry_name) {
+        $ext = strtolower(pathinfo($entry_name, PATHINFO_EXTENSION));
+        if (!in_array($ext, $image_exts, true)) continue;
+        $data = $zip->getFromName($entry_name);
+        if ($data === false) continue;
+        $filename = wp_unique_filename($upload_dir['path'], basename($entry_name));
+        $dest = trailingslashit($upload_dir['path']) . $filename;
+        if (file_put_contents($dest, $data) === false) continue;
+        $full_url = trailingslashit($upload_dir['url']) . $filename;
+        $alt_text = veyra_post_importer_derive_image_label(pathinfo($filename, PATHINFO_FILENAME));
+        $attach_id = wp_insert_attachment([
+            'post_title'     => $alt_text,
+            'post_mime_type' => wp_check_filetype($filename)['type'] ?: 'image/' . $ext,
+            'post_status'    => 'inherit',
+            'post_excerpt'   => $alt_text,
+            'post_content'   => '',
+        ], $dest);
+        if (!is_wp_error($attach_id) && $attach_id) {
+            require_once ABSPATH . 'wp-admin/includes/image.php';
+            $metadata = wp_generate_attachment_metadata($attach_id, $dest);
+            wp_update_attachment_metadata($attach_id, $metadata);
+            update_post_meta($attach_id, '_wp_attachment_image_alt', $alt_text);
+            $image_assets[] = ['id' => (int) $attach_id, 'url' => $full_url, 'alt' => $alt_text];
+        } else {
+            $image_assets[] = ['id' => null, 'url' => $full_url, 'alt' => $alt_text];
+        }
+    }
+    return $image_assets;
+}
+
+/**
+ * f5608 - bulk import. Each top-level subfolder in the uploaded zip is one article:
+ *   <folder>/article.txt  + <folder>/<images>
+ * Upserts each (update if backlink_id already associated, else create), de-duping by
+ * backlink_id within the run. Returns a result with a per-post list.
+ */
+function veyra_post_importer_handle_bulk_submit() {
+    if (empty($_POST['veyra_post_importer_action']) || $_POST['veyra_post_importer_action'] !== 'f5608_bulk_import') {
+        return null;
+    }
+    if (!current_user_can('edit_posts')) {
+        return ['level' => 'error', 'message' => 'You do not have permission to create posts.'];
+    }
+    if (empty($_POST['veyra_post_importer_nonce']) || !wp_verify_nonce($_POST['veyra_post_importer_nonce'], 'veyra_post_importer_f5607')) {
+        return ['level' => 'error', 'message' => 'Security check failed (invalid nonce). Reload and try again.'];
+    }
+    if (empty($_FILES['veyra_pack']['tmp_name']) || !empty($_FILES['veyra_pack']['error'])) {
+        return ['level' => 'error', 'message' => 'No zip file uploaded or upload failed.'];
+    }
+
+    $post_type   = (isset($_POST['veyra_post_type']) && $_POST['veyra_post_type'] === 'page') ? 'page' : 'post';
+    $post_status = (isset($_POST['veyra_post_status']) && $_POST['veyra_post_status'] === 'publish') ? 'publish' : 'draft';
+    $image_style = (isset($_POST['veyra_image_display']) && $_POST['veyra_image_display'] === 'wp_medium') ? 'wp_medium' : 'plain';
+
+    $zip = new ZipArchive();
+    if ($zip->open($_FILES['veyra_pack']['tmp_name']) !== true) {
+        return ['level' => 'error', 'message' => 'Could not open the uploaded zip.'];
+    }
+
+    // Group entries by top-level folder
+    $folders = []; // folder => ['article' => entry|null, 'images' => [entry,...]]
+    for ($i = 0; $i < $zip->numFiles; $i++) {
+        $name = $zip->getNameIndex($i);
+        if (substr($name, -1) === '/') continue; // skip dir entries
+        $slash = strpos($name, '/');
+        if ($slash === false) continue; // bulk pack content lives inside subfolders
+        $folder = substr($name, 0, $slash);
+        if (!isset($folders[$folder])) $folders[$folder] = ['article' => null, 'images' => []];
+        $base = basename($name);
+        if ($base === 'article.txt') $folders[$folder]['article'] = $name;
+        else $folders[$folder]['images'][] = $name;
+    }
+
+    if (empty($folders)) {
+        $zip->close();
+        return ['level' => 'error', 'message' => 'No subfolders found in the zip. Expected one folder per article (each with article.txt).'];
+    }
+
+    $results   = [];
+    $seen_ids  = [];
+    $created   = 0;
+    $updated   = 0;
+    $skipped   = 0;
+
+    foreach ($folders as $folder => $parts) {
+        if (empty($parts['article'])) { $skipped++; continue; }
+        $raw = $zip->getFromName($parts['article']);
+        if ($raw === false) { $skipped++; continue; }
+        $parsed = veyra_post_importer_parse_article_txt($raw);
+        if (empty($parsed['page_title']) && empty($parsed['page_content'])) { $skipped++; continue; }
+
+        // De-dupe by backlink_id within this run
+        $bid = trim((string) ($parsed['linksharn_backlink_id'] ?? ''));
+        if ($bid !== '' && isset($seen_ids[$bid])) { $skipped++; continue; }
+        if ($bid !== '') $seen_ids[$bid] = true;
+
+        $image_assets = veyra_post_importer_extract_zip_images($zip, $parts['images']);
+        $res = veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style);
+        if (!empty($res['error'])) {
+            $results[] = ['error' => $res['error'], 'title' => $parsed['page_title'], 'folder' => $folder];
+            $skipped++;
+            continue;
+        }
+        if ($res['updated']) $updated++; else $created++;
+        $results[] = $res;
+    }
+    $zip->close();
+
+    return [
+        'level'   => 'success',
+        'bulk'    => true,
+        'message' => sprintf('Bulk import complete: %d created, %d updated, %d skipped (of %d folders).', $created, $updated, $skipped, count($folders)),
+        'results' => $results,
     ];
 }
 
@@ -277,10 +458,13 @@ function veyra_post_importer_derive_image_label($filename_stem) {
  *   ...
  */
 function veyra_post_importer_parse_article_txt($raw) {
-    $out = ['birch_frontend_date' => '', 'page_title' => '', 'page_content' => ''];
+    $out = ['linksharn_backlink_id' => '', 'birch_frontend_date' => '', 'page_title' => '', 'page_content' => ''];
     // Normalize line endings
     $raw = str_replace(["\r\n", "\r"], "\n", $raw);
     // Split on markers
+    if (preg_match('/###\s*linksharn\.backlink_id\s*\n([\s\S]*?)(?=\n###\s*birch_frontend_date|\n###\s*page_title|\s*$)/i', $raw, $m)) {
+        $out['linksharn_backlink_id'] = trim($m[1]);
+    }
     if (preg_match('/###\s*birch_frontend_date\s*\n([\s\S]*?)(?=\n###\s*page_title|\s*$)/i', $raw, $m)) {
         $out['birch_frontend_date'] = trim($m[1]);
     }
@@ -410,6 +594,7 @@ function veyra_post_importer_format_image_block($asset, $style = 'plain') {
 // ---------------------------------------------------------------------------
 function veyra_post_importer_render_page() {
     $result = veyra_post_importer_handle_submit();
+    if (!$result) { $result = veyra_post_importer_handle_bulk_submit(); }
     $nonce  = wp_create_nonce('veyra_post_importer_f5607');
     $self   = admin_url('admin.php?page=veyra_post_importer');
     ?>
@@ -430,11 +615,30 @@ function veyra_post_importer_render_page() {
                         <a href="<?php echo esc_url($result['view_url']); ?>" target="_blank">View post</a>
                     </div>
                 <?php endif; ?>
+                <?php if (!empty($result['bulk']) && !empty($result['results'])): ?>
+                    <div style="margin-top: 10px;">
+                        <strong>Imported posts — click "edit" to open each in WP:</strong>
+                        <ul style="margin-top: 6px;">
+                        <?php foreach ($result['results'] as $r): ?>
+                            <?php if (!empty($r['error'])): ?>
+                                <li style="color:#991b1b;">✗ <?php echo esc_html($r['title'] ?: $r['folder']); ?> — <?php echo esc_html($r['error']); ?></li>
+                            <?php else: ?>
+                                <li>
+                                    <?php echo $r['updated'] ? '↻ updated' : '＋ created'; ?>:
+                                    <strong><?php echo esc_html($r['title']); ?></strong>
+                                    <?php if ($r['backlink_id'] !== ''): ?><span style="color:#666;">[backlink_id <?php echo esc_html($r['backlink_id']); ?>]</span><?php endif; ?>
+                                    &nbsp;<a href="<?php echo esc_url($r['edit_url']); ?>">edit</a>
+                                    &nbsp;|&nbsp;<a href="<?php echo esc_url($r['view_url']); ?>" target="_blank">view</a>
+                                </li>
+                            <?php endif; ?>
+                        <?php endforeach; ?>
+                        </ul>
+                    </div>
+                <?php endif; ?>
             </div>
         <?php endif; ?>
 
         <form method="post" action="<?php echo esc_url($self); ?>" enctype="multipart/form-data" style="max-width: 640px;">
-            <input type="hidden" name="veyra_post_importer_action" value="f5607_import" />
             <input type="hidden" name="veyra_post_importer_nonce" value="<?php echo esc_attr($nonce); ?>" />
 
             <fieldset style="margin-bottom: 16px;">
@@ -474,17 +678,26 @@ function veyra_post_importer_render_page() {
             </fieldset>
 
             <fieldset style="margin-bottom: 20px;">
-                <legend style="font-weight: 600; margin-bottom: 6px;">Import pack (.zip from birch wizard f5603)</legend>
+                <legend style="font-weight: 600; margin-bottom: 6px;">Import pack (.zip from birch wizard)</legend>
                 <input type="file" name="veyra_pack" accept=".zip" required />
                 <p style="color: #666; font-size: 12px; margin-top: 4px;">
-                    Expected contents: article.txt (with <code>### birch_frontend_date</code> / <code>### page_title</code> / <code>### page_content</code> sections) plus any image files.
+                    <strong>Single (f5607):</strong> a single pack — article.txt (with <code>### linksharn.backlink_id</code> / <code>### birch_frontend_date</code> / <code>### page_title</code> / <code>### page_content</code>) plus image files at the root.<br>
+                    <strong>Bulk (f5608):</strong> a bulk pack — one <em>subfolder per article</em>, each containing its own article.txt + images.<br>
+                    Both: if a post is already associated with the same <code>linksharn.backlink_id</code> (via the <code>tregnar_associated_linksharn_backlink_id</code> meta), it is <strong>updated</strong> instead of duplicated.
                 </p>
             </fieldset>
 
-            <button type="submit" class="button button-primary"
+            <button type="submit" name="veyra_post_importer_action" value="f5607_import" class="button button-primary"
                     style="padding: 8px 20px; font-size: 14px; background: #22c55e; border-color: #16a34a; color: #fff;">
                 f5607 - import birch-to-veyra article import pack
             </button>
+
+            <div style="margin-top: 14px; padding-top: 14px; border-top: 1px solid #e5e5e5;">
+                <button type="submit" name="veyra_post_importer_action" value="f5608_bulk_import" class="button button-primary"
+                        style="padding: 8px 20px; font-size: 14px; background: #2563eb; border-color: #1d4ed8; color: #fff;">
+                    f5608 - bulk import birch-to-veyra article import pack
+                </button>
+            </div>
         </form>
     </div>
     <?php
