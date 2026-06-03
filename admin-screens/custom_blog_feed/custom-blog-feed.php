@@ -24,6 +24,12 @@ if (!defined('VEYRA_CUSTOM_BLOG_FEED_OPTION')) {
     define('VEYRA_CUSTOM_BLOG_FEED_OPTION', 'veyra_custom_blog_feed_page');
 }
 
+// When '1' (default), the feed page's own H1 title (its post_title) is not
+// output at the top of the page on the front end.
+if (!defined('VEYRA_CUSTOM_BLOG_FEED_HIDE_H1_OPTION')) {
+    define('VEYRA_CUSTOM_BLOG_FEED_HIDE_H1_OPTION', 'veyra_custom_blog_feed_page_hide_main_h1_title');
+}
+
 /* ---------------------------------------------------------------------------
  * Admin menu + page
  * ------------------------------------------------------------------------- */
@@ -57,6 +63,7 @@ function veyra_custom_blog_feed_render_admin() {
 
         if ($page_id > 0 && get_post_status($page_id) === 'publish' && get_post_type($page_id) === 'page') {
             update_option(VEYRA_CUSTOM_BLOG_FEED_OPTION, $page_id);
+            update_option(VEYRA_CUSTOM_BLOG_FEED_HIDE_H1_OPTION, isset($_POST['veyra_cbf_hide_h1']) ? '1' : '0');
             $notice = array('level' => 'success', 'message' => 'Custom blog feed page set to: <strong>' . esc_html(get_the_title($page_id)) . '</strong>');
         } else {
             $notice = array('level' => 'error', 'message' => 'Please choose a published page.');
@@ -140,6 +147,16 @@ function veyra_custom_blog_feed_render_admin() {
                     ));
                     ?>
                 </p>
+                <p style="margin-top: 4px;">
+                    <label>
+                        <input type="checkbox" name="veyra_cbf_hide_h1" value="1" <?php checked(get_option(VEYRA_CUSTOM_BLOG_FEED_HIDE_H1_OPTION, '1'), '1'); ?> />
+                        Hide the page's main H1 title on the front end
+                    </label>
+                    <br>
+                    <span style="color: #888; font-size: 12px;">
+                        When checked (default), the feed page's own title (its <code>post_title</code>) is not output at the top of the page. Uncheck to show it as normal.
+                    </span>
+                </p>
                 <p>
                     <button type="submit" class="button button-primary" style="background: #22c55e; border-color: #16a34a;">
                         Set page as custom blog feed page
@@ -157,6 +174,37 @@ function veyra_custom_blog_feed_render_admin() {
 /* ---------------------------------------------------------------------------
  * Front-end rendering
  * ------------------------------------------------------------------------- */
+
+/**
+ * Optionally hide the feed page's own H1 title on the front end.
+ *
+ * Tightly scoped so it ONLY blanks the title of the designated feed page when
+ * it's drawn as the main page heading: matching post ID, on that page, in the
+ * main query's main loop. This leaves nav-menu items, inner-post titles in the
+ * feed (a secondary query), widgets, and the <title> tag untouched.
+ */
+add_filter('the_title', 'veyra_custom_blog_feed_maybe_hide_title', 10, 2);
+function veyra_custom_blog_feed_maybe_hide_title($title, $post_id = 0) {
+    if (is_admin()) {
+        return $title;
+    }
+
+    $feed_page_id = (int) get_option(VEYRA_CUSTOM_BLOG_FEED_OPTION, 0);
+    if (!$feed_page_id || (int) $post_id !== $feed_page_id) {
+        return $title;
+    }
+
+    // Default ON: only show the title if the option is explicitly '0'.
+    if (get_option(VEYRA_CUSTOM_BLOG_FEED_HIDE_H1_OPTION, '1') !== '1') {
+        return $title;
+    }
+
+    if (is_page($feed_page_id) && is_main_query() && in_the_loop()) {
+        return '';
+    }
+
+    return $title;
+}
 
 add_filter('the_content', 'veyra_custom_blog_feed_filter_content', 20);
 function veyra_custom_blog_feed_filter_content($content) {
