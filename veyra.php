@@ -822,3 +822,5 @@ new Veyra();
 // and render callback. Keeps page-specific code out of this main file.
 // ---------------------------------------------------------------------------
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/post_importer_from_birch/post-importer-from-birch.php';
+require_once VEYRA_PLUGIN_PATH . 'admin-screens/veyra_plugin_manager/veyra-plugin-manager.php';
+require_once VEYRA_PLUGIN_PATH . 'admin-screens/custom_blog_feed/custom-blog-feed.php';

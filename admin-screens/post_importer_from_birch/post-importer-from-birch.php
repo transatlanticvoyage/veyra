@@ -257,11 +257,32 @@ function veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $po
         'post_title'   => $title,
         'post_content' => $content_with_images,
     ];
+    $scheduled = false;
     if (!empty($parsed['birch_frontend_date'])) {
         $ts = strtotime($parsed['birch_frontend_date']);
         if ($ts !== false) {
-            $postarr['post_date']     = gmdate('Y-m-d H:i:s', $ts);
-            $postarr['post_date_gmt'] = gmdate('Y-m-d H:i:s', $ts);
+            // Interpret birch_frontend_date as the site's local wall-clock time
+            // (WP runs with PHP default tz = UTC, so strtotime() of the string
+            // gives us that wall-clock as a UTC timestamp). Store post_date as
+            // local and derive the correct GMT value from it so scheduling works
+            // on non-UTC sites too.
+            $local_str = gmdate('Y-m-d H:i:s', $ts);
+            $postarr['post_date']     = $local_str;
+            $postarr['post_date_gmt'] = get_gmt_from_date($local_str);
+            // Ensure the date change actually sticks when updating an existing post.
+            $postarr['edit_date']     = true;
+
+            // If the publish date is in the future and the user chose to publish,
+            // schedule the post (WordPress would auto-flip 'publish' -> 'future',
+            // but we set it explicitly so intent is unambiguous on both the
+            // insert and update paths). Drafts are left as drafts.
+            if ($post_status === 'publish') {
+                $gmt_ts = strtotime($postarr['post_date_gmt'] . ' GMT');
+                if ($gmt_ts !== false && ($gmt_ts - time()) >= MINUTE_IN_SECONDS) {
+                    $postarr['post_status'] = 'future';
+                    $scheduled = true;
+                }
+            }
         }
     }
 
@@ -283,13 +304,15 @@ function veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $po
     }
 
     return [
-        'post_id'     => (int) $post_id,
-        'updated'     => $updated,
-        'title'       => $title,
-        'backlink_id' => $backlink_id,
-        'images'      => count($image_assets),
-        'edit_url'    => get_edit_post_link($post_id, ''),
-        'view_url'    => get_permalink($post_id),
+        'post_id'        => (int) $post_id,
+        'updated'        => $updated,
+        'title'          => $title,
+        'backlink_id'    => $backlink_id,
+        'images'         => count($image_assets),
+        'scheduled'      => $scheduled,
+        'scheduled_date' => $scheduled ? get_post_field('post_date', $post_id) : '',
+        'edit_url'       => get_edit_post_link($post_id, ''),
+        'view_url'       => get_permalink($post_id),
     ];
 }
 
