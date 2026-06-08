@@ -363,8 +363,20 @@ function veyra_smr_render_page() {
         wp_die('Unauthorized');
     }
     global $wpdb;
-    $t = veyra_smr_table();
-    $rows = $wpdb->get_results("SELECT * FROM {$t} ORDER BY id DESC");
+    $t  = veyra_smr_table();
+    $ps = $wpdb->prefix . 'sm_page_source';
+    $mm = $wpdb->prefix . 'sm_majestic_metrics';
+    // Pull Majestic Trust Flow / Referring Domains for the page each redirect targets
+    // (redirect.wp_post_id -> page_source -> majestic_metrics). GROUP BY keeps one row
+    // per redirect even if a post has more than one source/metrics row.
+    $rows = $wpdb->get_results(
+        "SELECT r.*, MAX(m.trust_flow) AS mj_tf, MAX(m.external_referring_domains) AS mj_rd
+         FROM {$t} r
+         LEFT JOIN {$ps} ps ON ps.wp_post_id = r.wp_post_id
+         LEFT JOIN {$mm} m  ON m.page_source_id = ps.id
+         GROUP BY r.id
+         ORDER BY r.id DESC"
+    );
     $edit = null;
     if (isset($_GET['edit'])) {
         $edit = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$t} WHERE id=%d", intval($_GET['edit'])));
@@ -415,17 +427,22 @@ function veyra_smr_render_page() {
             <table class="wp-list-table widefat fixed striped">
                 <thead><tr>
                     <td class="check-column" style="width:2.2em"><input type="checkbox" id="veyra-smr-select-all" title="Select all"></td>
-                    <th style="width:50px">id</th><th>source_path</th><th>target_url</th>
+                    <th style="width:50px">id</th>
+                    <th style="width:60px" title="Majestic Trust Flow of the target page">mj_tf</th>
+                    <th style="width:70px" title="Majestic External Referring Domains of the target page">mj_rd</th>
+                    <th>source_path</th><th>target_url</th>
                     <th style="width:60px">type</th><th style="width:60px">active</th>
                     <th style="width:60px">hits</th><th style="width:120px">actions</th>
                 </tr></thead>
                 <tbody>
                 <?php if (!$rows): ?>
-                    <tr><td colspan="8">No redirects yet. Use <strong>Create New</strong>, import a CSV, or generate from Structure-Medic data below.</td></tr>
+                    <tr><td colspan="10">No redirects yet. Use <strong>Create New</strong>, import a CSV, or generate from Structure-Medic data below.</td></tr>
                 <?php else: foreach ($rows as $r): ?>
                     <tr>
                         <th scope="row" class="check-column"><input type="checkbox" class="veyra-smr-cb" name="ids[]" value="<?php echo intval($r->id); ?>"></th>
                         <td><?php echo intval($r->id); ?></td>
+                        <td><?php echo ($r->mj_tf !== null ? intval($r->mj_tf) : ''); ?></td>
+                        <td><?php echo ($r->mj_rd !== null ? intval($r->mj_rd) : ''); ?></td>
                         <td>
                             <button type="button" class="button button-small veyra-smr-open" data-url="<?php echo esc_attr(home_url($r->source_path)); ?>">open</button>
                             <button type="button" class="button button-small veyra-smr-copy" data-url="<?php echo esc_attr(home_url($r->source_path)); ?>">copy</button>
