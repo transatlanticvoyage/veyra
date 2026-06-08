@@ -33,6 +33,9 @@ class Veyra {
         add_action('init', array($this, 'init'));
         add_action('admin_menu', array($this, 'add_admin_menu'));
         add_action('admin_bar_menu', array($this, 'add_elephant_tools_to_admin_bar'), 100);
+        // Keep the admin-bar item's icon + label on one line (front-end & admin).
+        add_action('wp_head', array($this, 'veyra_admin_bar_styles'));
+        add_action('admin_head', array($this, 'veyra_admin_bar_styles'));
         add_action('wp_enqueue_scripts', array($this, 'enqueue_scripts'));
         add_action('admin_enqueue_scripts', array($this, 'enqueue_scripts'));
         add_action('wp_ajax_veyra_get_post_title', array($this, 'ajax_get_post_title'));
@@ -59,6 +62,29 @@ class Veyra {
         if (get_option('veyra_show_fossil_content_on_blog_feed_page', false)) {
             add_action('loop_start', array($this, 'inject_fossil_content'));
         }
+
+        // Fossil content (below feed): inject custom HTML at the BOTTOM of blog feed page 1.
+        // loop_end handles the no-pagination case; the navigation filter places it AFTER
+        // the pagination buttons ("1 2 Next ») when pagination is present.
+        if (get_option('veyra_show_fossil_content_below_feed_on_blog_feed_page', false)) {
+            add_action('loop_end', array($this, 'inject_fossil_content_below_feed'));
+            add_filter('navigation_markup_template', array($this, 'append_fossil_below_to_pagination'), 10, 2);
+        }
+
+        // Structure-Medic (sm_*) source-data tables + ingest REST endpoint.
+        // Tables are created/upgraded automatically on init when the schema
+        // version changes — no plugin reactivation required.
+        add_action('init', array($this, 'veyra_sm_maybe_upgrade_db'));
+        add_action('rest_api_init', array($this, 'veyra_sm_register_routes'));
+
+        // Structure-Medic post-editor panel (Classic editor): a full-width bar
+        // above the title showing/editing this page's sm_* data. Inputs live
+        // inside the post form, so native Save/Publish persists them via save_post.
+        add_action('edit_form_top', array($this, 'veyra_sm_render_editor_bar'));
+        add_action('save_post', array($this, 'veyra_sm_save_editor'), 10, 2);
+        add_action('admin_print_styles-post.php', array($this, 'veyra_sm_editor_styles'));
+        add_action('admin_print_styles-post-new.php', array($this, 'veyra_sm_editor_styles'));
+        add_action('admin_print_footer_scripts', array($this, 'veyra_sm_editor_js'));
     }
     
     /**
@@ -140,6 +166,9 @@ class Veyra {
         }
         check_admin_referer('veyra_save_options', 'veyra_options_nonce');
 
+        $home_anchor = isset($_POST['veyra_custom_defined_anchor_for_homepage_nav_item']) ? sanitize_text_field(wp_unslash($_POST['veyra_custom_defined_anchor_for_homepage_nav_item'])) : '';
+        update_option('veyra_custom_defined_anchor_for_homepage_nav_item', $home_anchor);
+
         $show_full = isset($_POST['veyra_show_full_post_on_blog_feed_pages']) ? true : false;
         update_option('veyra_show_full_post_on_blog_feed_pages', $show_full);
 
@@ -148,6 +177,12 @@ class Veyra {
 
         $fossil_content = isset($_POST['veyra_fossil_content']) ? wp_kses_post(wp_unslash($_POST['veyra_fossil_content'])) : '';
         update_option('veyra_fossil_content', $fossil_content);
+
+        $show_fossil_below = isset($_POST['veyra_show_fossil_content_below_feed_on_blog_feed_page']) ? true : false;
+        update_option('veyra_show_fossil_content_below_feed_on_blog_feed_page', $show_fossil_below);
+
+        $fossil_content_below = isset($_POST['veyra_fossil_content_below_feed']) ? wp_kses_post(wp_unslash($_POST['veyra_fossil_content_below_feed'])) : '';
+        update_option('veyra_fossil_content_below_feed', $fossil_content_below);
 
         $hauser_emblem = isset($_POST['veyra_hauser_themes_header_emblem_text']) ? sanitize_text_field($_POST['veyra_hauser_themes_header_emblem_text']) : '';
         update_option('veyra_hauser_themes_header_emblem_text', $hauser_emblem);
@@ -192,6 +227,46 @@ class Veyra {
         }
     }
 
+    private function fossil_below_html() {
+        $content = get_option('veyra_fossil_content_below_feed', '');
+        if (empty($content)) {
+            return '';
+        }
+        return '<div class="veyra-fossil-content veyra-fossil-content-below-feed">' . wpautop(wp_unslash($content)) . '</div>';
+    }
+
+    public function inject_fossil_content_below_feed($query) {
+        if (!$query->is_main_query() || !is_home() || is_paged()) {
+            return;
+        }
+        // When pagination is present, the content is appended AFTER the buttons by
+        // append_fossil_below_to_pagination(); only emit here if there is no pagination.
+        if ($query->max_num_pages > 1) {
+            return;
+        }
+        echo $this->fossil_below_html();
+    }
+
+    // Appends the below-feed fossil content after the posts pagination nav ("1 2 Next »").
+    public function append_fossil_below_to_pagination($template, $class) {
+        if (is_admin()) {
+            return $template;
+        }
+        if (strpos($class, 'pagination') === false || strpos($class, 'comment') !== false) {
+            return $template; // only the posts pagination, not comments/post navigation
+        }
+        if (!is_home() || is_paged()) {
+            return $template; // blog feed, page 1 only
+        }
+        $html = $this->fossil_below_html();
+        if ($html === '') {
+            return $template;
+        }
+        // _navigation_markup() runs sprintf() on this template afterward, so any literal
+        // '%' in our HTML must be escaped to survive it.
+        return $template . str_replace('%', '%%', $html);
+    }
+
     public function replace_excerpt_with_content($excerpt) {
         if (is_home() || is_archive() || is_search()) {
             global $post;
@@ -212,9 +287,12 @@ class Veyra {
     }
 
     public function render_hub_page() {
+        $home_anchor = get_option('veyra_custom_defined_anchor_for_homepage_nav_item', '');
         $show_full = get_option('veyra_show_full_post_on_blog_feed_pages', false);
         $show_fossil = get_option('veyra_show_fossil_content_on_blog_feed_page', false);
         $fossil_content = get_option('veyra_fossil_content', '');
+        $show_fossil_below = get_option('veyra_show_fossil_content_below_feed_on_blog_feed_page', false);
+        $fossil_content_below = get_option('veyra_fossil_content_below_feed', '');
         $hauser_emblem = get_option('veyra_hauser_themes_header_emblem_text', '');
         $saved = isset($_GET['saved']) ? true : false;
 
@@ -240,6 +318,13 @@ class Veyra {
                 <?php wp_nonce_field('veyra_save_options', 'veyra_options_nonce'); ?>
 
                 <table class="form-table">
+                    <tr>
+                        <th scope="row">veyra_custom_defined_anchor_for_homepage_nav_item</th>
+                        <td>
+                            <input type="text" name="veyra_custom_defined_anchor_for_homepage_nav_item" value="<?php echo esc_attr($home_anchor); ?>" class="regular-text" placeholder="Home" />
+                            <p class="description">The nav-menu anchor text that the CleanPress theme treats as the "Home" link, so it gets the active (blue) styling when a visitor is on the homepage &mdash; even when the homepage only shows posts. Leave blank to use the default anchor <code>Home</code>. Set to a custom value (e.g. <code>Main</code>, <code>Inicio</code>) to match a differently-labelled home link.</p>
+                        </td>
+                    </tr>
                     <tr>
                         <th scope="row">veyra_hauser_themes_header_emblem_text</th>
                         <td>
@@ -270,6 +355,22 @@ class Veyra {
                         <td>
                             <textarea name="veyra_fossil_content" rows="12" cols="80" class="large-text code"><?php echo esc_textarea($fossil_content); ?></textarea>
                             <p class="description">HTML content to display at the top of the blog feed page (before posts). Only shown on page 1. Line breaks are automatically converted to paragraphs.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">veyra_fossil_content_below_feed</th>
+                        <td>
+                            <textarea name="veyra_fossil_content_below_feed" rows="12" cols="80" class="large-text code"><?php echo esc_textarea($fossil_content_below); ?></textarea>
+                            <p class="description">HTML content to display at the BOTTOM of the blog feed page (after posts). Only shown on page 1. Line breaks are automatically converted to paragraphs.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">veyra_show_fossil_content_below_feed_on_blog_feed_page</th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="veyra_show_fossil_content_below_feed_on_blog_feed_page" value="1" <?php checked($show_fossil_below); ?> />
+                                When enabled, displays the below-feed fossil content at the bottom of the blog feed page (page 1 only, not paginated pages).
+                            </label>
                         </td>
                     </tr>
                 </table>
@@ -383,6 +484,21 @@ class Veyra {
             </form>
         </div>
         <?php
+    }
+
+    /** Prevent the "Veyra Elephant Tools" admin-bar label from wrapping below
+     *  its icon (which bled out of the 32px bar). Forces icon + text onto one
+     *  centered line. Printed only when the admin bar is showing. */
+    public function veyra_admin_bar_styles() {
+        if (!is_admin_bar_showing()) {
+            return;
+        }
+        echo '<style id="veyra-adminbar-fix">'
+            . '#wpadminbar #wp-admin-bar-veyra-elephant-tools > .ab-item{'
+            . 'display:flex;align-items:center;white-space:nowrap;}'
+            . '#wpadminbar #wp-admin-bar-veyra-elephant-tools > .ab-item img{'
+            . 'width:16px;height:16px;margin:0 6px 0 0;vertical-align:middle;flex:0 0 auto;}'
+            . '</style>';
     }
 
     public function add_elephant_tools_to_admin_bar($wp_admin_bar) {
@@ -812,10 +928,573 @@ class Veyra {
         }
         return null;
     }
+
+    // =====================================================================
+    // Structure-Medic source data (sm_* tables)
+    // Stores per-page provenance + Majestic backlink data for injected pages.
+    // =====================================================================
+
+    const VEYRA_SM_DB_VERSION = '3';
+
+    /** Base folder that holds the per-domain original source sites fed into
+     *  Structure-Medic. Combined with the run's domain + local_file_path to build
+     *  the "open original file" link in the editor. */
+    const VEYRA_SM_SOURCE_BASE = '/Users/kc/Documents/repos/safari-traunch/';
+
+    /** Map logical table key => full table name (with wpdb prefix). */
+    private function veyra_sm_tables() {
+        global $wpdb;
+        $p = $wpdb->prefix;
+        return array(
+            'runs'       => $p . 'sm_injection_runs',
+            'page'       => $p . 'sm_page_source',
+            'urls'       => $p . 'sm_original_urls',
+            'metrics'    => $p . 'sm_majestic_metrics',
+            'ttf'        => $p . 'sm_topical_trust_flow',
+            'backlinks'  => $p . 'sm_referring_backlinks',
+        );
+    }
+
+    /** Create or upgrade the sm_* tables via dbDelta when the version changes. */
+    public function veyra_sm_maybe_upgrade_db() {
+        if (get_option('veyra_sm_db_version') === self::VEYRA_SM_DB_VERSION) {
+            return;
+        }
+        $this->veyra_sm_create_tables();
+        update_option('veyra_sm_db_version', self::VEYRA_SM_DB_VERSION);
+    }
+
+    /** Run dbDelta for all sm_* tables. Safe to call repeatedly (idempotent). */
+    public function veyra_sm_create_tables() {
+        global $wpdb;
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+        $t = $this->veyra_sm_tables();
+        $charset = $wpdb->get_charset_collate();
+
+        dbDelta("CREATE TABLE {$t['runs']} (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  domain varchar(255) NOT NULL DEFAULT '',
+  project_run varchar(255) NOT NULL DEFAULT '',
+  majestic_export_file varchar(512) NOT NULL DEFAULT '',
+  run_mode varchar(32) NOT NULL DEFAULT '',
+  pages_injected int(11) NOT NULL DEFAULT 0,
+  run_started_at datetime NULL,
+  run_finished_at datetime NULL,
+  created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY  (id),
+  KEY domain (domain),
+  KEY project_run (project_run)
+) {$charset};");
+
+        dbDelta("CREATE TABLE {$t['page']} (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  run_id bigint(20) unsigned NULL,
+  wp_post_id bigint(20) unsigned NOT NULL,
+  original_html_slug varchar(512) NOT NULL DEFAULT '',
+  canonical_original_url varchar(1024) NOT NULL DEFAULT '',
+  local_file_path varchar(1024) NOT NULL DEFAULT '',
+  wp_slug varchar(255) NOT NULL DEFAULT '',
+  wp_full_path varchar(512) NOT NULL DEFAULT '',
+  wp_parent_slug varchar(512) NOT NULL DEFAULT '',
+  is_pdf tinyint(1) NOT NULL DEFAULT 0,
+  is_asset tinyint(1) NOT NULL DEFAULT 0,
+  is_front_page tinyint(1) NOT NULL DEFAULT 0,
+  majestic_category varchar(255) NOT NULL DEFAULT '',
+  retention_reason varchar(255) NOT NULL DEFAULT '',
+  page_title text,
+  post_date_extracted datetime NULL,
+  created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY  (id),
+  UNIQUE KEY wp_post_id (wp_post_id),
+  KEY original_html_slug (original_html_slug(191)),
+  KEY canonical_original_url (canonical_original_url(191)),
+  KEY run_id (run_id)
+) {$charset};");
+
+        dbDelta("CREATE TABLE {$t['urls']} (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  page_source_id bigint(20) unsigned NOT NULL,
+  original_url varchar(1024) NOT NULL DEFAULT '',
+  url_path varchar(1024) NOT NULL DEFAULT '',
+  url_extension varchar(32) NOT NULL DEFAULT '',
+  has_query_string tinyint(1) NOT NULL DEFAULT 0,
+  is_canonical tinyint(1) NOT NULL DEFAULT 0,
+  redirect_to_wp tinyint(1) NOT NULL DEFAULT 1,
+  redirect_http_code smallint(6) NOT NULL DEFAULT 301,
+  PRIMARY KEY  (id),
+  KEY page_source_id (page_source_id),
+  KEY original_url (original_url(191))
+) {$charset};");
+
+        dbDelta("CREATE TABLE {$t['metrics']} (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  page_source_id bigint(20) unsigned NOT NULL,
+  external_referring_domains int(11) NOT NULL DEFAULT 0,
+  external_inbound_links int(11) NOT NULL DEFAULT 0,
+  external_referring_urls int(11) NOT NULL DEFAULT 0,
+  trust_flow smallint(6) NOT NULL DEFAULT 0,
+  citation_flow smallint(6) NOT NULL DEFAULT 0,
+  last_crawl_result varchar(64) NOT NULL DEFAULT '',
+  last_seen date NULL,
+  language varchar(16) NOT NULL DEFAULT '',
+  language_confidence int(11) NOT NULL DEFAULT 0,
+  consolidation_qty_rows int(11) NOT NULL DEFAULT 0,
+  consolidation_highest_tf smallint(6) NOT NULL DEFAULT 0,
+  consolidation_lowest_tf smallint(6) NOT NULL DEFAULT 0,
+  consolidation_highest_ref_domains int(11) NOT NULL DEFAULT 0,
+  consolidation_lowest_ref_domains int(11) NOT NULL DEFAULT 0,
+  PRIMARY KEY  (id),
+  UNIQUE KEY page_source_id (page_source_id),
+  KEY trust_flow (trust_flow)
+) {$charset};");
+
+        dbDelta("CREATE TABLE {$t['ttf']} (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  page_source_id bigint(20) unsigned NOT NULL,
+  ttf_rank tinyint(3) unsigned NOT NULL DEFAULT 0,
+  topic varchar(128) NOT NULL DEFAULT '',
+  value smallint(6) NOT NULL DEFAULT 0,
+  PRIMARY KEY  (id),
+  KEY page_source_id (page_source_id)
+) {$charset};");
+
+        dbDelta("CREATE TABLE {$t['backlinks']} (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  page_source_id bigint(20) unsigned NOT NULL,
+  source_url varchar(1024) NOT NULL DEFAULT '',
+  source_domain varchar(255) NOT NULL DEFAULT '',
+  anchor_text text,
+  source_trust_flow smallint(6) NOT NULL DEFAULT 0,
+  link_type varchar(16) NOT NULL DEFAULT '',
+  first_seen date NULL,
+  last_seen date NULL,
+  PRIMARY KEY  (id),
+  KEY page_source_id (page_source_id),
+  KEY source_domain (source_domain)
+) {$charset};");
+    }
+
+    /** Register the ingest REST route used by structure-medic Phase 10. */
+    public function veyra_sm_register_routes() {
+        register_rest_route('veyra/v1', '/sm-page-source', array(
+            'methods'             => 'POST',
+            'callback'            => array($this, 'veyra_sm_ingest'),
+            'permission_callback' => function () { return current_user_can('edit_pages'); },
+        ));
+        register_rest_route('veyra/v1', '/sm-editor-save', array(
+            'methods'             => 'POST',
+            'callback'            => array($this, 'veyra_sm_editor_save_rest'),
+            'permission_callback' => function ($req) {
+                return current_user_can('edit_post', intval($req->get_param('wp_post_id')));
+            },
+        ));
+        // Returns the wp_post_ids that Structure-Medic currently manages (from
+        // sm_page_source). The injector deletes ONLY these before re-injecting —
+        // so manual posts and other pages are never touched.
+        register_rest_route('veyra/v1', '/sm-page-ids', array(
+            'methods'             => 'GET',
+            'callback'            => function () {
+                global $wpdb;
+                $t = $this->veyra_sm_tables();
+                $ids = $wpdb->get_col("SELECT wp_post_id FROM {$t['page']}");
+                return array('ids' => array_map('intval', $ids));
+            },
+            'permission_callback' => function () { return current_user_can('edit_pages'); },
+        ));
+    }
+
+    /**
+     * Upsert all structure-medic source data for one injected WP page.
+     * Idempotent: re-posting for the same wp_post_id replaces its sm_* rows.
+     */
+    public function veyra_sm_ingest($request) {
+        global $wpdb;
+        $t = $this->veyra_sm_tables();
+        $b = $request->get_json_params();
+
+        $wp_post_id = isset($b['wp_post_id']) ? intval($b['wp_post_id']) : 0;
+        if (!$wp_post_id || !get_post($wp_post_id)) {
+            return new WP_Error('veyra_sm_bad_post', 'Missing or unknown wp_post_id', array('status' => 400));
+        }
+
+        // 1. Upsert the run row (one per domain + project_run).
+        $run    = isset($b['run']) ? $b['run'] : array();
+        $domain = isset($run['domain']) ? $run['domain'] : '';
+        $proj   = isset($run['project_run']) ? $run['project_run'] : '';
+        $run_id = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$t['runs']} WHERE domain=%s AND project_run=%s", $domain, $proj));
+        if (!$run_id) {
+            $wpdb->insert($t['runs'], array(
+                'domain' => $domain,
+                'project_run' => $proj,
+                'majestic_export_file' => isset($run['majestic_export_file']) ? $run['majestic_export_file'] : '',
+                'run_mode' => isset($run['run_mode']) ? $run['run_mode'] : '',
+            ));
+            $run_id = $wpdb->insert_id;
+        }
+
+        // 2. Remove any existing rows for this page (idempotent re-inject).
+        $old = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$t['page']} WHERE wp_post_id=%d", $wp_post_id));
+        if ($old) {
+            foreach (array('urls', 'metrics', 'ttf', 'backlinks') as $k) {
+                $wpdb->delete($t[$k], array('page_source_id' => $old));
+            }
+            $wpdb->delete($t['page'], array('id' => $old));
+        }
+
+        // 3. Insert the page_source row.
+        $pg = isset($b['page']) ? $b['page'] : array();
+        $wpdb->insert($t['page'], array(
+            'run_id' => $run_id,
+            'wp_post_id' => $wp_post_id,
+            'original_html_slug' => isset($pg['original_html_slug']) ? $pg['original_html_slug'] : '',
+            'canonical_original_url' => isset($pg['canonical_original_url']) ? $pg['canonical_original_url'] : '',
+            'local_file_path' => isset($pg['local_file_path']) ? $pg['local_file_path'] : '',
+            'wp_slug' => isset($pg['wp_slug']) ? $pg['wp_slug'] : '',
+            'wp_full_path' => isset($pg['wp_full_path']) ? $pg['wp_full_path'] : '',
+            'wp_parent_slug' => isset($pg['wp_parent_slug']) ? $pg['wp_parent_slug'] : '',
+            'is_pdf' => !empty($pg['is_pdf']) ? 1 : 0,
+            'is_asset' => !empty($pg['is_asset']) ? 1 : 0,
+            'is_front_page' => !empty($pg['is_front_page']) ? 1 : 0,
+            'majestic_category' => isset($pg['majestic_category']) ? $pg['majestic_category'] : '',
+            'retention_reason' => isset($pg['retention_reason']) ? $pg['retention_reason'] : '',
+            'page_title' => isset($pg['page_title']) ? $pg['page_title'] : '',
+            'post_date_extracted' => !empty($pg['post_date_extracted']) ? $pg['post_date_extracted'] : null,
+        ));
+        $page_source_id = $wpdb->insert_id;
+        if (!$page_source_id) {
+            return new WP_Error('veyra_sm_insert_failed',
+                'page_source insert failed: ' . $wpdb->last_error,
+                array('status' => 500));
+        }
+
+        // 4. Majestic metrics (1:1).
+        if (!empty($b['metrics'])) {
+            $m = $b['metrics'];
+            $wpdb->insert($t['metrics'], array(
+                'page_source_id' => $page_source_id,
+                'external_referring_domains' => intval($m['external_referring_domains'] ?? 0),
+                'external_inbound_links' => intval($m['external_inbound_links'] ?? 0),
+                'external_referring_urls' => intval($m['external_referring_urls'] ?? 0),
+                'trust_flow' => intval($m['trust_flow'] ?? 0),
+                'citation_flow' => intval($m['citation_flow'] ?? 0),
+                'last_crawl_result' => $m['last_crawl_result'] ?? '',
+                'last_seen' => !empty($m['last_seen']) ? $m['last_seen'] : null,
+                'language' => $m['language'] ?? '',
+                'language_confidence' => intval($m['language_confidence'] ?? 0),
+                'consolidation_qty_rows' => intval($m['consolidation_qty_rows'] ?? 0),
+                'consolidation_highest_tf' => intval($m['consolidation_highest_tf'] ?? 0),
+                'consolidation_lowest_tf' => intval($m['consolidation_lowest_tf'] ?? 0),
+                'consolidation_highest_ref_domains' => intval($m['consolidation_highest_ref_domains'] ?? 0),
+                'consolidation_lowest_ref_domains' => intval($m['consolidation_lowest_ref_domains'] ?? 0),
+            ));
+        }
+
+        // 5. Original URLs (1:many).
+        if (!empty($b['original_urls']) && is_array($b['original_urls'])) {
+            foreach ($b['original_urls'] as $u) {
+                $wpdb->insert($t['urls'], array(
+                    'page_source_id' => $page_source_id,
+                    'original_url' => $u['original_url'] ?? '',
+                    'url_path' => $u['url_path'] ?? '',
+                    'url_extension' => $u['url_extension'] ?? '',
+                    'has_query_string' => !empty($u['has_query_string']) ? 1 : 0,
+                    'is_canonical' => !empty($u['is_canonical']) ? 1 : 0,
+                    'redirect_to_wp' => isset($u['redirect_to_wp']) ? (!empty($u['redirect_to_wp']) ? 1 : 0) : 1,
+                    'redirect_http_code' => intval($u['redirect_http_code'] ?? 301),
+                ));
+            }
+        }
+
+        // 6. Topical Trust Flow (1:many).
+        if (!empty($b['topical_trust_flow']) && is_array($b['topical_trust_flow'])) {
+            foreach ($b['topical_trust_flow'] as $ttf) {
+                $wpdb->insert($t['ttf'], array(
+                    'page_source_id' => $page_source_id,
+                    'ttf_rank' => intval($ttf['rank'] ?? 0),
+                    'topic' => $ttf['topic'] ?? '',
+                    'value' => intval($ttf['value'] ?? 0),
+                ));
+            }
+        }
+
+        return array('ok' => true, 'page_source_id' => $page_source_id, 'run_id' => $run_id);
+    }
+
+    // ---- Post-editor panel: view/edit sm_* data for the current page --------
+
+    /** Columns shown read-only and never written from the editor. */
+    private function veyra_sm_structural_cols() {
+        return array('id', 'page_source_id', 'run_id', 'wp_post_id', 'created_at', 'updated_at');
+    }
+
+    /** Load all sm_* rows for a post, grouped (and ordered) by table name. */
+    private function veyra_sm_load_for_post($post_id) {
+        global $wpdb;
+        $t = $this->veyra_sm_tables();
+        $ps = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$t['page']} WHERE wp_post_id=%d", $post_id), ARRAY_A);
+        if (!$ps) {
+            return array();
+        }
+        $psid = intval($ps['id']);
+        $out = array();
+        if (!empty($ps['run_id'])) {
+            $run = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$t['runs']} WHERE id=%d", $ps['run_id']), ARRAY_A);
+            if ($run) { $out[$t['runs']] = array($run); }
+        }
+        $out[$t['page']] = array($ps);
+        foreach (array('metrics' => 'id', 'urls' => 'id', 'ttf' => 'ttf_rank', 'backlinks' => 'id') as $k => $order) {
+            $rows = $wpdb->get_results($wpdb->prepare(
+                "SELECT * FROM {$t[$k]} WHERE page_source_id=%d ORDER BY {$order}", $psid), ARRAY_A);
+            if ($rows) { $out[$t[$k]] = $rows; }
+        }
+        return $out;
+    }
+
+    /** Full-width bar above the title (edit_form_top) with the sm_* fields. */
+    public function veyra_sm_render_editor_bar($post) {
+        if (!$post || !in_array($post->post_type, array('post', 'page'), true)) {
+            return;
+        }
+        $data = $this->veyra_sm_load_for_post($post->ID);
+        $struct = $this->veyra_sm_structural_cols();
+        // Domain for the "open original file" link (from this run's injection row).
+        $runs_table = $this->veyra_sm_tables()['runs'];
+        $sm_domain = '';
+        if (!empty($data[$runs_table][0]['domain'])) {
+            $sm_domain = $data[$runs_table][0]['domain'];
+        }
+        $file_prefix = 'file://' . rtrim(self::VEYRA_SM_SOURCE_BASE, '/') . '/' . $sm_domain;
+        echo '<div class="veyra-sm-bar" id="veyra-sm-bar">';
+        echo '<div class="veyra-sm-bar__header" id="veyra-sm-bar-header">'
+            . '<span class="veyra-sm-bar__label">veyra structure medic info</span>'
+            . '<span class="veyra-sm-bar__toggle" id="veyra-sm-toggle">[collapse]</span></div>';
+        echo '<div class="veyra-sm-bar__body" id="veyra-sm-bar-body">';
+        wp_nonce_field('veyra_sm_save', 'veyra_sm_nonce');
+        echo '<div class="veyra-sm-actions"><button type="button" class="button button-primary" id="veyra-sm-save">Save SM Data</button> <span id="veyra-sm-save-status" class="veyra-sm-status"></span></div>';
+        if (empty($data)) {
+            echo '<p class="veyra-sm-empty">No Structure-Medic data is associated with this page.</p>';
+        } else {
+            foreach ($data as $table => $rows) {
+                echo '<div class="veyra-sm-table">';
+                echo '<div class="veyra-sm-table__name">' . esc_html($table) . '</div>';
+                foreach ($rows as $row) {
+                    $rid = isset($row['id']) ? intval($row['id']) : 0;
+                    echo '<div class="veyra-sm-row">';
+                    foreach ($row as $col => $val) {
+                        $is_struct = in_array($col, $struct, true);
+                        $is_url = (stripos($col, 'url') !== false) && !$is_struct;
+                        $name = 'sm[' . esc_attr($table) . '][' . $rid . '][' . esc_attr($col) . ']';
+                        echo '<div class="veyra-sm-field">';
+                        echo '<label>' . esc_html($col) . '</label>';
+                        if ($col === 'local_file_path') {
+                            echo '<div class="veyra-sm-linkrow">';
+                            echo '<input type="text" class="veyra-sm-input" name="' . $name . '" value="' . esc_attr($val) . '" />';
+                            echo '<button type="button" class="button veyra-sm-openfile" data-prefix="' . esc_attr($file_prefix) . '">open</button>';
+                            echo '<button type="button" class="button veyra-sm-copyfile" data-prefix="' . esc_attr($file_prefix) . '">copy path</button>';
+                            echo '</div>';
+                        } elseif ($is_url) {
+                            echo '<div class="veyra-sm-linkrow">';
+                            echo '<input type="text" class="veyra-sm-input" name="' . $name . '" value="' . esc_attr($val) . '" />';
+                            echo '<button type="button" class="button veyra-sm-open">open</button>';
+                            echo '<button type="button" class="button veyra-sm-wayback">wayback</button>';
+                            echo '</div>';
+                        } elseif ($is_struct) {
+                            echo '<input type="text" readonly="readonly" class="veyra-sm-input veyra-sm-ro" value="' . esc_attr($val) . '" />';
+                        } else {
+                            echo '<input type="text" class="veyra-sm-input" name="' . $name . '" value="' . esc_attr($val) . '" />';
+                        }
+                        echo '</div>';
+                    }
+                    echo '</div>';
+                }
+                echo '</div>';
+            }
+        }
+        echo '</div></div>';
+    }
+
+    /** Persist edited sm_* fields on native Save/Publish (save_post). */
+    public function veyra_sm_save_editor($post_id, $post) {
+        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) { return; }
+        if (wp_is_post_revision($post_id)) { return; }
+        if (!isset($_POST['veyra_sm_nonce']) || !wp_verify_nonce($_POST['veyra_sm_nonce'], 'veyra_sm_save')) { return; }
+        if (!current_user_can('edit_post', $post_id)) { return; }
+        if (empty($_POST['sm']) || !is_array($_POST['sm'])) { return; }
+        $this->veyra_sm_apply_updates($post_id, wp_unslash($_POST['sm']));
+    }
+
+    /** REST save used by the bar's standalone "Save SM Data" button. */
+    public function veyra_sm_editor_save_rest($request) {
+        $post_id = intval($request->get_param('wp_post_id'));
+        if (!$post_id || !get_post($post_id)) {
+            return new WP_Error('veyra_sm_bad_post', 'Unknown post', array('status' => 400));
+        }
+        $n = $this->veyra_sm_apply_updates($post_id, $request->get_param('sm'));
+        return array('ok' => true, 'rows_updated' => $n);
+    }
+
+    /** Apply edited sm_* field values (shared by save_post and REST save).
+     *  Whitelists tables/columns and only touches rows owned by $post_id. */
+    private function veyra_sm_apply_updates($post_id, $sm) {
+        global $wpdb;
+        if (!is_array($sm)) { return 0; }
+        $struct = $this->veyra_sm_structural_cols();
+
+        $valid = $this->veyra_sm_load_for_post($post_id);
+        $owned = array();
+        foreach ($valid as $table => $rows) {
+            foreach ($rows as $r) { $owned[$table][intval($r['id'])] = true; }
+        }
+
+        $updated = 0;
+        foreach ($sm as $table => $rows) {
+            if (!isset($owned[$table]) || !is_array($rows)) { continue; }
+            $cols = $wpdb->get_col("DESCRIBE `" . esc_sql($table) . "`");
+            foreach ($rows as $rid => $fields) {
+                $rid = intval($rid);
+                if (empty($owned[$table][$rid]) || !is_array($fields)) { continue; }
+                $update = array();
+                foreach ($fields as $col => $val) {
+                    if (in_array($col, $struct, true) || !in_array($col, $cols, true)) { continue; }
+                    $update[$col] = is_scalar($val) ? (string) $val : '';
+                }
+                if ($update) {
+                    $wpdb->update($table, $update, array('id' => $rid));
+                    $updated++;
+                }
+            }
+        }
+        return $updated;
+    }
+
+    /** Inline styles for the editor bar (only on the post edit screens). */
+    public function veyra_sm_editor_styles() {
+        echo '<style>
+        .veyra-sm-bar { border:1px solid #c3c4c7; background:#fff; margin:0 0 16px 0; }
+        .veyra-sm-bar__header { background:#1d2327; color:#fff; padding:10px 14px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; }
+        .veyra-sm-bar__label { font-weight:700; font-size:16px; font-style:normal; }
+        .veyra-sm-bar__toggle { font-size:12px; opacity:.85; }
+        .veyra-sm-bar.collapsed .veyra-sm-bar__body { display:none; }
+        .veyra-sm-bar__body { padding:14px; }
+        .veyra-sm-empty { font-style:italic; color:#646970; }
+        .veyra-sm-table { border:1px solid #c3c4c7; padding:12px; margin:0 0 14px 0; }
+        .veyra-sm-table__name { font-weight:700; font-size:16px; font-style:normal; margin-bottom:10px; }
+        .veyra-sm-row { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px,1fr)); gap:10px 18px; margin-bottom:8px; padding-bottom:8px; border-bottom:1px dashed #e0e0e0; }
+        .veyra-sm-field label { display:block; font-weight:700; font-size:16px; font-style:normal; margin-bottom:3px; }
+        .veyra-sm-input { width:100%; }
+        .veyra-sm-ro { background:#f0f0f1; color:#646970; }
+        .veyra-sm-linkrow { display:flex; gap:4px; align-items:center; }
+        .veyra-sm-linkrow .veyra-sm-input { flex:1; }
+        .veyra-sm-actions { margin:0 0 12px 0; }
+        .veyra-sm-status { margin-left:10px; font-style:italic; color:#646970; }
+        </style>';
+    }
+
+    /** Collapse toggle + open / wayback link buttons (post edit screen only). */
+    public function veyra_sm_editor_js() {
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+        if (!$screen || $screen->base !== 'post') { return; }
+        $cfg = array(
+            'url'    => esc_url_raw(rest_url('veyra/v1/sm-editor-save')),
+            'nonce'  => wp_create_nonce('wp_rest'),
+            'postId' => isset($_GET['post']) ? intval($_GET['post']) : (int) get_the_ID(),
+        );
+        ?>
+        <script>
+        window.veyraSm = <?php echo wp_json_encode($cfg); ?>;
+        (function(){
+            var bar = document.getElementById('veyra-sm-bar');
+            if (!bar) { return; }
+            var header = document.getElementById('veyra-sm-bar-header');
+            var toggle = document.getElementById('veyra-sm-toggle');
+            var KEY = 'veyra_sm_collapsed';
+            function apply(c){
+                if (c) { bar.classList.add('collapsed'); if (toggle) toggle.textContent = '[expand]'; }
+                else  { bar.classList.remove('collapsed'); if (toggle) toggle.textContent = '[collapse]'; }
+            }
+            apply(localStorage.getItem(KEY) === '1');
+            header.addEventListener('click', function(){
+                var c = !bar.classList.contains('collapsed');
+                apply(c); localStorage.setItem(KEY, c ? '1' : '0');
+            });
+            bar.addEventListener('click', function(e){
+                var t = e.target;
+                if (!t.classList) { return; }
+                if (t.classList.contains('veyra-sm-open') || t.classList.contains('veyra-sm-wayback')) {
+                    e.preventDefault();
+                    var rowEl = t.closest('.veyra-sm-linkrow');
+                    var inp = rowEl ? rowEl.querySelector('input') : null;
+                    var url = inp ? inp.value.trim() : '';
+                    if (!url) { return; }
+                    if (t.classList.contains('veyra-sm-wayback')) {
+                        window.open('https://web.archive.org/web/*/' + url, '_blank');
+                    } else {
+                        window.open(url, '_blank');
+                    }
+                } else if (t.classList.contains('veyra-sm-openfile') || t.classList.contains('veyra-sm-copyfile')) {
+                    e.preventDefault();
+                    var rowEl2 = t.closest('.veyra-sm-linkrow');
+                    var inp2 = rowEl2 ? rowEl2.querySelector('input') : null;
+                    var rel = inp2 ? inp2.value.trim() : '';
+                    if (!rel) { return; }
+                    var prefix = t.getAttribute('data-prefix') || '';
+                    // prefix = file://<base>/<domain> ; rel = /legal.html (path may have spaces)
+                    var fileUrl = prefix + '/' + encodeURI(rel.replace(/^\/+/, ''));
+                    if (t.classList.contains('veyra-sm-openfile')) {
+                        window.open(fileUrl, '_blank');
+                    } else {
+                        // Copy to clipboard. navigator.clipboard needs a secure context
+                        // (lagoon.local is plain http), so use the textarea fallback.
+                        var ta = document.createElement('textarea');
+                        ta.value = fileUrl;
+                        ta.style.position = 'fixed'; ta.style.opacity = '0';
+                        document.body.appendChild(ta); ta.focus(); ta.select();
+                        var ok = false;
+                        try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+                        document.body.removeChild(ta);
+                        var orig = t.textContent;
+                        t.textContent = ok ? 'copied!' : 'copy failed';
+                        setTimeout(function(){ t.textContent = orig; }, 1500);
+                    }
+                }
+            });
+            var saveBtn = document.getElementById('veyra-sm-save');
+            var statusEl = document.getElementById('veyra-sm-save-status');
+            if (saveBtn && window.veyraSm) {
+                saveBtn.addEventListener('click', function(e){
+                    e.preventDefault(); e.stopPropagation();
+                    var sm = {};
+                    bar.querySelectorAll('input[name^="sm["]').forEach(function(inp){
+                        var m = inp.name.match(/^sm\[([^\]]+)\]\[([^\]]+)\]\[([^\]]+)\]$/);
+                        if (!m) { return; }
+                        sm[m[1]] = sm[m[1]] || {};
+                        sm[m[1]][m[2]] = sm[m[1]][m[2]] || {};
+                        sm[m[1]][m[2]][m[3]] = inp.value;
+                    });
+                    if (statusEl) { statusEl.textContent = 'saving\u2026'; }
+                    fetch(window.veyraSm.url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'X-WP-Nonce': window.veyraSm.nonce },
+                        body: JSON.stringify({ wp_post_id: window.veyraSm.postId, sm: sm })
+                    }).then(function(r){ return r.json(); })
+                      .then(function(d){ if (statusEl) { statusEl.textContent = (d && d.ok) ? ('saved (' + d.rows_updated + ' rows updated)') : 'save failed'; } })
+                      .catch(function(){ if (statusEl) { statusEl.textContent = 'save error'; } });
+                });
+            }
+        })();
+        </script>
+        <?php
+    }
 }
 
 // Start the plugin
-new Veyra();
+$veyra = new Veyra();
+
+// Create sm_* tables on activation (init-time check also covers code updates).
+register_activation_hook(__FILE__, array($veyra, 'veyra_sm_create_tables'));
 
 // ---------------------------------------------------------------------------
 // Admin screens — each under /admin-screens/<folder>/ self-registers its menu
@@ -823,4 +1502,5 @@ new Veyra();
 // ---------------------------------------------------------------------------
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/post_importer_from_birch/post-importer-from-birch.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/veyra_plugin_manager/veyra-plugin-manager.php';
+require_once VEYRA_PLUGIN_PATH . 'admin-screens/sm-redirect-manager/sm-redirect-manager.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/custom_blog_feed/custom-blog-feed.php';

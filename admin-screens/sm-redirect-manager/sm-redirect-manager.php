@@ -1,0 +1,541 @@
+<?php
+/**
+ * Veyra — SM Redirect Manager admin screen.
+ *
+ * Self-contained feature: creates the wp_sm_redirects table, registers an admin
+ * page at /wp-admin/admin.php?page=sm_redirect_manager under the Veyra menu,
+ * provides a CRUD grid + CSV import + "generate from Structure-Medic data",
+ * and runs the front-end 301 redirect engine.
+ *
+ * Kept entirely in this file to avoid cluttering veyra.php.
+ */
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+define('VEYRA_SMR_DB_VERSION', '1');
+
+function veyra_smr_table() {
+    global $wpdb;
+    return $wpdb->prefix . 'sm_redirects';
+}
+
+/** Create/upgrade the wp_sm_redirects table when the version changes. */
+function veyra_smr_maybe_create_table() {
+    if (get_option('veyra_smr_db_version') === VEYRA_SMR_DB_VERSION) {
+        return;
+    }
+    veyra_smr_create_table();
+    update_option('veyra_smr_db_version', VEYRA_SMR_DB_VERSION);
+}
+add_action('init', 'veyra_smr_maybe_create_table');
+
+function veyra_smr_create_table() {
+    global $wpdb;
+    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    $t = veyra_smr_table();
+    $charset = $wpdb->get_charset_collate();
+    dbDelta("CREATE TABLE {$t} (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  source_url varchar(1024) NOT NULL DEFAULT '',
+  source_path varchar(512) NOT NULL DEFAULT '',
+  target_url varchar(1024) NOT NULL DEFAULT '',
+  redirect_type smallint(6) NOT NULL DEFAULT 301,
+  wp_post_id bigint(20) unsigned NULL,
+  is_active tinyint(1) NOT NULL DEFAULT 1,
+  hits int(11) NOT NULL DEFAULT 0,
+  last_hit_at datetime NULL,
+  notes varchar(255) NOT NULL DEFAULT '',
+  created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY  (id),
+  KEY source_path (source_path(191)),
+  KEY is_active (is_active)
+) {$charset};");
+}
+register_activation_hook(VEYRA_PLUGIN_PATH . 'veyra.php', 'veyra_smr_create_table');
+
+/** Normalize any URL or path to a comparable request path: leading slash, no
+ *  query/hash, no trailing slash (except root), URL-decoded. */
+function veyra_smr_norm_path($url) {
+    $p = trim((string) $url);
+    if (preg_match('#^https?://#i', $p)) {
+        $parts = wp_parse_url($p);
+        $p = isset($parts['path']) ? $parts['path'] : '/';
+    }
+    $p = preg_replace('/[?#].*$/', '', $p);
+    $p = '/' . ltrim(rawurldecode($p), '/');
+    if (strlen($p) > 1) {
+        $p = rtrim($p, '/');
+    }
+    return $p;
+}
+
+/** Like veyra_smr_norm_path but KEEPS the query string (e.g. ColdFusion
+ *  showreport.cfm?reportid=495), so query-distinguished old URLs map to distinct
+ *  targets. Used for storage + as the primary match (path-only is the fallback). */
+function veyra_smr_norm_path_full($url) {
+    $u = trim((string) $url);
+    $u = preg_replace('/#.*$/', '', $u);
+    $path = $u; $q = '';
+    if (preg_match('#^https?://#i', $u)) {
+        $parts = wp_parse_url($u);
+        $path = isset($parts['path']) ? $parts['path'] : '/';
+        $q = isset($parts['query']) ? $parts['query'] : '';
+    } else {
+        $bits = explode('?', $u, 2);
+        $path = $bits[0];
+        $q = isset($bits[1]) ? $bits[1] : '';
+    }
+    $path = '/' . ltrim(rawurldecode($path), '/');
+    if (strlen($path) > 1) {
+        $path = rtrim($path, '/');
+    }
+    return $q !== '' ? $path . '?' . rawurldecode($q) : $path;
+}
+
+// ---------------------------------------------------------------------------
+// Front-end 301 redirect engine
+// ---------------------------------------------------------------------------
+add_action('template_redirect', 'veyra_smr_do_redirect', 1);
+function veyra_smr_do_redirect() {
+    if (is_admin() || empty($_SERVER['REQUEST_URI'])) {
+        return;
+    }
+    global $wpdb;
+    $t = veyra_smr_table();
+    $full = veyra_smr_norm_path_full($_SERVER['REQUEST_URI']);
+    $path = veyra_smr_norm_path($_SERVER['REQUEST_URI']);
+    if ($path === '' || $path === '/') {
+        return;
+    }
+    // Prefer an exact match including the query string; fall back to path-only.
+    $row = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM {$t} WHERE is_active=1 AND source_path IN (%s,%s) ORDER BY (source_path=%s) DESC LIMIT 1",
+        $full, $path, $full));
+    if (!$row || empty($row->target_url)) {
+        return;
+    }
+    // Self-loop guard: never redirect to the path we are already on. A directory-form
+    // redirect like /organization -> /organization/ would otherwise loop forever,
+    // because the normalizer strips the incoming trailing slash (/organization/ ->
+    // /organization), which then re-matches the same row. Fall through to WordPress.
+    $target_path = veyra_smr_norm_path((string) parse_url($row->target_url, PHP_URL_PATH));
+    if ($target_path === $path || $target_path === $full) {
+        return;
+    }
+    $wpdb->query($wpdb->prepare(
+        "UPDATE {$t} SET hits=hits+1, last_hit_at=NOW() WHERE id=%d", $row->id));
+    $code = intval($row->redirect_type);
+    if (!in_array($code, array(301, 302, 307, 308), true)) {
+        $code = 301;
+    }
+    wp_redirect($row->target_url, $code);
+    exit;
+}
+
+// ---------------------------------------------------------------------------
+// Build redirects from the Structure-Medic sm_* tables (old URL -> new permalink)
+// ---------------------------------------------------------------------------
+function veyra_smr_generate_from_sm() {
+    global $wpdb;
+    $t  = veyra_smr_table();
+    $ps = $wpdb->prefix . 'sm_page_source';
+    $ou = $wpdb->prefix . 'sm_original_urls';
+    // Table guard.
+    if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $ou)) !== $ou) {
+        return 0;
+    }
+    $rows = $wpdb->get_results(
+        "SELECT o.original_url, o.redirect_http_code, ps.wp_post_id
+         FROM {$ou} o JOIN {$ps} ps ON ps.id = o.page_source_id
+         WHERE o.redirect_to_wp = 1");
+    $count = 0;
+    foreach ($rows as $r) {
+        $target = get_permalink(intval($r->wp_post_id));
+        if (!$target) {
+            continue;
+        }
+        $source_path = veyra_smr_norm_path_full($r->original_url);
+        if ($source_path === '' || $source_path === '/') {
+            continue; // never redirect the homepage
+        }
+        // Skip if the old path already equals the new target path (no-op redirect).
+        if ($source_path === veyra_smr_norm_path($target)) {
+            continue;
+        }
+        $type = intval($r->redirect_http_code);
+        if (!$type) {
+            $type = 301;
+        }
+        $data = array(
+            'source_url'    => $r->original_url,
+            'source_path'   => $source_path,
+            'target_url'    => $target,
+            'redirect_type' => $type,
+            'wp_post_id'    => intval($r->wp_post_id),
+            'is_active'     => 1,
+            'notes'         => 'generated from sm_original_urls',
+            'updated_at'    => current_time('mysql'),
+        );
+        $existing = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$t} WHERE source_path=%s", $source_path));
+        if ($existing) {
+            $wpdb->update($t, $data, array('id' => intval($existing)));
+        } else {
+            $wpdb->insert($t, $data);
+        }
+        $count++;
+    }
+    return $count;
+}
+
+// REST trigger for generation (so it can be run headlessly with an app password).
+add_action('rest_api_init', function () {
+    register_rest_route('veyra/v1', '/sm-redirects-generate', array(
+        'methods'             => 'POST',
+        'callback'            => function () {
+            return array('ok' => true, 'created' => veyra_smr_generate_from_sm());
+        },
+        'permission_callback' => function () { return current_user_can('manage_options'); },
+    ));
+});
+
+// ---------------------------------------------------------------------------
+// Admin: menu, notice suppression, action handlers, page render
+// ---------------------------------------------------------------------------
+add_action('admin_menu', 'veyra_smr_register_menu', 20);
+function veyra_smr_register_menu() {
+    add_submenu_page(
+        'veyra-hub-1',                 // parent (Veyra Hub 1)
+        'SM Redirect Manager',         // page title
+        'SM Redirect Manager',         // menu label
+        'manage_options',              // capability
+        'sm_redirect_manager',         // slug -> ?page=sm_redirect_manager
+        'veyra_smr_render_page'        // callback
+    );
+}
+
+/** Aggressive notice/warning/message suppression on this screen only. */
+add_action('in_admin_header', 'veyra_smr_suppress_notices', 1);
+function veyra_smr_suppress_notices() {
+    if (!isset($_GET['page']) || $_GET['page'] !== 'sm_redirect_manager') {
+        return;
+    }
+    remove_all_actions('admin_notices');
+    remove_all_actions('all_admin_notices');
+    remove_all_actions('network_admin_notices');
+    remove_all_actions('user_admin_notices');
+    echo '<style>#wpbody-content .notice,#wpbody-content .updated,#wpbody-content .error,'
+        . '#wpbody-content .update-nag,#wpbody-content div.notice,#wpbody-content .notice-warning,'
+        . '#wpbody-content .notice-info,#wpbody-content .notice-success{display:none !important;}</style>';
+}
+
+add_action('admin_init', 'veyra_smr_handle_actions');
+function veyra_smr_handle_actions() {
+    if (!isset($_GET['page']) || $_GET['page'] !== 'sm_redirect_manager') {
+        return;
+    }
+    if (!current_user_can('manage_options')) {
+        return;
+    }
+    global $wpdb;
+    $t = veyra_smr_table();
+
+    // Add or edit a single redirect.
+    if (isset($_POST['veyra_smr_save']) && check_admin_referer('veyra_smr_save', 'veyra_smr_nonce')) {
+        $id     = intval($_POST['id'] ?? 0);
+        $source = esc_url_raw(trim(wp_unslash($_POST['source_url'] ?? '')));
+        $target = esc_url_raw(trim(wp_unslash($_POST['target_url'] ?? '')));
+        $type   = intval($_POST['redirect_type'] ?? 301) ?: 301;
+        $active = isset($_POST['is_active']) ? 1 : 0;
+        $notes  = sanitize_text_field(wp_unslash($_POST['notes'] ?? ''));
+        if ($source && $target) {
+            $data = array(
+                'source_url'    => $source,
+                'source_path'   => veyra_smr_norm_path_full($source),
+                'target_url'    => $target,
+                'redirect_type' => $type,
+                'is_active'     => $active,
+                'notes'         => $notes,
+                'updated_at'    => current_time('mysql'),
+            );
+            if ($id) {
+                $wpdb->update($t, $data, array('id' => $id));
+            } else {
+                $wpdb->insert($t, $data);
+            }
+        }
+        wp_safe_redirect(admin_url('admin.php?page=sm_redirect_manager&saved=1'));
+        exit;
+    }
+
+    // Delete (single).
+    if (isset($_GET['delete']) && check_admin_referer('veyra_smr_delete_' . intval($_GET['delete']))) {
+        $wpdb->delete($t, array('id' => intval($_GET['delete'])));
+        wp_safe_redirect(admin_url('admin.php?page=sm_redirect_manager&deleted=1'));
+        exit;
+    }
+
+    // Delete (bulk, from checkbox selection).
+    if (isset($_POST['veyra_smr_bulk_delete']) && check_admin_referer('veyra_smr_bulk_delete', 'veyra_smr_bulk_nonce')) {
+        $ids = array_filter(array_map('intval', (array) ($_POST['ids'] ?? array())));
+        $n = 0;
+        if ($ids) {
+            // $ids are all integers, so this IN() list is injection-safe.
+            $n = $wpdb->query("DELETE FROM {$t} WHERE id IN (" . implode(',', $ids) . ")");
+        }
+        wp_safe_redirect(admin_url('admin.php?page=sm_redirect_manager&deleted=' . intval($n)));
+        exit;
+    }
+
+    // CSV import.
+    if (isset($_POST['veyra_smr_import']) && check_admin_referer('veyra_smr_import', 'veyra_smr_import_nonce')) {
+        $n = veyra_smr_handle_csv_import();
+        wp_safe_redirect(admin_url('admin.php?page=sm_redirect_manager&imported=' . intval($n)));
+        exit;
+    }
+
+    // Generate from Structure-Medic data.
+    if (isset($_POST['veyra_smr_generate']) && check_admin_referer('veyra_smr_generate', 'veyra_smr_generate_nonce')) {
+        $n = veyra_smr_generate_from_sm();
+        wp_safe_redirect(admin_url('admin.php?page=sm_redirect_manager&generated=' . intval($n)));
+        exit;
+    }
+}
+
+/** Import a CSV of: source_url, target_url, redirect_type(optional). */
+function veyra_smr_handle_csv_import() {
+    global $wpdb;
+    $t = veyra_smr_table();
+    if (empty($_FILES['veyra_smr_csv']['tmp_name']) || !is_uploaded_file($_FILES['veyra_smr_csv']['tmp_name'])) {
+        return 0;
+    }
+    $fh = fopen($_FILES['veyra_smr_csv']['tmp_name'], 'r');
+    if (!$fh) {
+        return 0;
+    }
+    $count = 0;
+    $first = true;
+    while (($row = fgetcsv($fh)) !== false) {
+        if (count(array_filter($row, 'strlen')) === 0) {
+            continue;
+        }
+        // Skip a header row if present.
+        if ($first) {
+            $first = false;
+            $joined = strtolower(implode(',', $row));
+            if (strpos($joined, 'source') !== false && strpos($joined, 'target') !== false) {
+                continue;
+            }
+        }
+        $source = isset($row[0]) ? esc_url_raw(trim($row[0])) : '';
+        $target = isset($row[1]) ? esc_url_raw(trim($row[1])) : '';
+        $type   = isset($row[2]) ? (intval($row[2]) ?: 301) : 301;
+        if (!$source || !$target) {
+            continue;
+        }
+        $source_path = veyra_smr_norm_path_full($source);
+        $data = array(
+            'source_url'    => $source,
+            'source_path'   => $source_path,
+            'target_url'    => $target,
+            'redirect_type' => $type,
+            'is_active'     => 1,
+            'notes'         => 'csv import',
+            'updated_at'    => current_time('mysql'),
+        );
+        $existing = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$t} WHERE source_path=%s", $source_path));
+        if ($existing) {
+            $wpdb->update($t, $data, array('id' => intval($existing)));
+        } else {
+            $wpdb->insert($t, $data);
+        }
+        $count++;
+    }
+    fclose($fh);
+    return $count;
+}
+
+function veyra_smr_render_page() {
+    if (!current_user_can('manage_options')) {
+        wp_die('Unauthorized');
+    }
+    global $wpdb;
+    $t = veyra_smr_table();
+    $rows = $wpdb->get_results("SELECT * FROM {$t} ORDER BY id DESC");
+    $edit = null;
+    if (isset($_GET['edit'])) {
+        $edit = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$t} WHERE id=%d", intval($_GET['edit'])));
+    }
+    $base = admin_url('admin.php?page=sm_redirect_manager');
+    ?>
+    <div class="wrap veyra-smr">
+        <h1>SM Redirect Manager</h1>
+        <?php
+        if (isset($_GET['saved']))     { echo '<p class="veyra-smr-msg">Redirect saved.</p>'; }
+        if (isset($_GET['deleted']))   { echo '<p class="veyra-smr-msg">Deleted ' . intval($_GET['deleted']) . ' redirect(s).</p>'; }
+        if (isset($_GET['imported']))  { echo '<p class="veyra-smr-msg">Imported ' . intval($_GET['imported']) . ' redirect(s).</p>'; }
+        if (isset($_GET['generated'])) { echo '<p class="veyra-smr-msg">Generated ' . intval($_GET['generated']) . ' redirect(s) from Structure-Medic data.</p>'; }
+        ?>
+
+        <p><button type="button" class="button button-primary" id="veyra-smr-new">Create New</button></p>
+
+        <div id="veyra-smr-form" style="<?php echo $edit ? '' : 'display:none;'; ?>">
+            <form method="post">
+                <?php wp_nonce_field('veyra_smr_save', 'veyra_smr_nonce'); ?>
+                <input type="hidden" name="id" value="<?php echo $edit ? intval($edit->id) : 0; ?>">
+                <table class="form-table">
+                    <tr><th>source_url <span style="font-weight:400">(old URL or path)</span></th>
+                        <td><input type="text" name="source_url" style="width:100%" value="<?php echo $edit ? esc_attr($edit->source_url) : ''; ?>"></td></tr>
+                    <tr><th>target_url <span style="font-weight:400">(new URL)</span></th>
+                        <td><input type="text" name="target_url" style="width:100%" value="<?php echo $edit ? esc_attr($edit->target_url) : ''; ?>"></td></tr>
+                    <tr><th>redirect_type</th>
+                        <td><input type="number" name="redirect_type" style="width:90px" value="<?php echo $edit ? intval($edit->redirect_type) : 301; ?>"> <span style="font-weight:400">301 by default</span></td></tr>
+                    <tr><th>is_active</th>
+                        <td><input type="checkbox" name="is_active" value="1" <?php echo (!$edit || $edit->is_active) ? 'checked' : ''; ?>></td></tr>
+                    <tr><th>notes</th>
+                        <td><input type="text" name="notes" style="width:100%" value="<?php echo $edit ? esc_attr($edit->notes) : ''; ?>"></td></tr>
+                </table>
+                <p>
+                    <button type="submit" name="veyra_smr_save" value="1" class="button button-primary"><?php echo $edit ? 'Update Redirect' : 'Save Redirect'; ?></button>
+                    <a href="<?php echo esc_url($base); ?>" class="button">Cancel</a>
+                </p>
+            </form>
+        </div>
+
+        <h2>Existing Redirects (<?php echo count($rows); ?>)</h2>
+        <form method="post" id="veyra-smr-bulk-form">
+            <?php wp_nonce_field('veyra_smr_bulk_delete', 'veyra_smr_bulk_nonce'); ?>
+            <p>
+                <button type="submit" name="veyra_smr_bulk_delete" value="1" class="button button-link-delete" id="veyra-smr-bulk-delete-btn"<?php echo $rows ? '' : ' disabled'; ?>>Delete Selected</button>
+                <span id="veyra-smr-sel-count" style="margin-left:8px;color:#646970;"></span>
+            </p>
+            <table class="wp-list-table widefat fixed striped">
+                <thead><tr>
+                    <td class="check-column" style="width:2.2em"><input type="checkbox" id="veyra-smr-select-all" title="Select all"></td>
+                    <th style="width:50px">id</th><th>source_path</th><th>target_url</th>
+                    <th style="width:60px">type</th><th style="width:60px">active</th>
+                    <th style="width:60px">hits</th><th style="width:120px">actions</th>
+                </tr></thead>
+                <tbody>
+                <?php if (!$rows): ?>
+                    <tr><td colspan="8">No redirects yet. Use <strong>Create New</strong>, import a CSV, or generate from Structure-Medic data below.</td></tr>
+                <?php else: foreach ($rows as $r): ?>
+                    <tr>
+                        <th scope="row" class="check-column"><input type="checkbox" class="veyra-smr-cb" name="ids[]" value="<?php echo intval($r->id); ?>"></th>
+                        <td><?php echo intval($r->id); ?></td>
+                        <td>
+                            <button type="button" class="button button-small veyra-smr-open" data-url="<?php echo esc_attr(home_url($r->source_path)); ?>">open</button>
+                            <button type="button" class="button button-small veyra-smr-copy" data-url="<?php echo esc_attr(home_url($r->source_path)); ?>">copy</button>
+                            <code><?php echo esc_html($r->source_path); ?></code>
+                        </td>
+                        <td><a href="<?php echo esc_url($r->target_url); ?>" target="_blank"><?php echo esc_html($r->target_url); ?></a></td>
+                        <td><?php echo intval($r->redirect_type); ?></td>
+                        <td><?php echo $r->is_active ? 'yes' : 'no'; ?></td>
+                        <td><?php echo intval($r->hits); ?></td>
+                        <td>
+                            <a href="<?php echo esc_url(add_query_arg('edit', intval($r->id), $base)); ?>">edit</a> |
+                            <a href="<?php echo esc_url(wp_nonce_url(add_query_arg('delete', intval($r->id), $base), 'veyra_smr_delete_' . intval($r->id))); ?>"
+                               onclick="return confirm('Delete this redirect?');">delete</a>
+                        </td>
+                    </tr>
+                <?php endforeach; endif; ?>
+                </tbody>
+            </table>
+        </form>
+
+        <hr style="margin:24px 0">
+        <h2>Import / Generate</h2>
+        <form method="post" enctype="multipart/form-data" style="margin-bottom:16px">
+            <?php wp_nonce_field('veyra_smr_import', 'veyra_smr_import_nonce'); ?>
+            <strong>CSV import</strong> &mdash; columns: <code>source_url, target_url, redirect_type</code> (type optional, defaults 301):
+            <input type="file" name="veyra_smr_csv" accept=".csv">
+            <button type="submit" name="veyra_smr_import" value="1" class="button">Import CSV</button>
+        </form>
+        <form method="post">
+            <?php wp_nonce_field('veyra_smr_generate', 'veyra_smr_generate_nonce'); ?>
+            <strong>Generate from Structure-Medic data</strong> &mdash; builds 301s from <code>wp_sm_original_urls</code> &rarr; each page's permalink:
+            <button type="submit" name="veyra_smr_generate" value="1" class="button">Generate Redirects from SM Data</button>
+        </form>
+    </div>
+    <style>
+        .veyra-smr-msg{color:#0a7d28;font-weight:600;}
+        .veyra-smr table.form-table th{width:220px;text-align:left;vertical-align:top;}
+        .veyra-smr code{font-size:12px;}
+    </style>
+    <script>
+    (function(){
+        var b = document.getElementById('veyra-smr-new');
+        var f = document.getElementById('veyra-smr-form');
+        if (b && f) { b.addEventListener('click', function(){ f.style.display = (f.style.display === 'none' ? '' : 'none'); }); }
+
+        // Open / copy the source path as a URL on THIS site (to test the redirect).
+        document.addEventListener('click', function(e){
+            var t = e.target;
+            if (!t.classList) { return; }
+            if (t.classList.contains('veyra-smr-open')) {
+                e.preventDefault();
+                window.open(t.getAttribute('data-url'), '_blank');
+            } else if (t.classList.contains('veyra-smr-copy')) {
+                e.preventDefault();
+                var ta = document.createElement('textarea');
+                ta.value = t.getAttribute('data-url') || '';
+                ta.style.position = 'fixed'; ta.style.opacity = '0';
+                document.body.appendChild(ta); ta.focus(); ta.select();
+                var ok = false;
+                try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+                document.body.removeChild(ta);
+                var orig = t.textContent;
+                t.textContent = ok ? 'copied!' : 'copy failed';
+                setTimeout(function(){ t.textContent = orig; }, 1200);
+            }
+        });
+
+        // ---- Bulk select + delete (with double confirmation) ----
+        var bulkForm  = document.getElementById('veyra-smr-bulk-form');
+        var selectAll = document.getElementById('veyra-smr-select-all');
+        function cbs(){ return bulkForm ? bulkForm.querySelectorAll('.veyra-smr-cb') : []; }
+        function selectedCount(){ var n = 0; cbs().forEach(function(c){ if (c.checked) n++; }); return n; }
+        function updateCount(){
+            var n = selectedCount();
+            var el = document.getElementById('veyra-smr-sel-count');
+            if (el) { el.textContent = n ? (n + ' selected') : ''; }
+            if (selectAll) {
+                var total = cbs().length;
+                selectAll.checked = (total > 0 && n === total);
+                selectAll.indeterminate = (n > 0 && n < total);
+            }
+        }
+        if (selectAll) {
+            selectAll.addEventListener('change', function(){
+                cbs().forEach(function(c){ c.checked = selectAll.checked; });
+                updateCount();
+            });
+        }
+        if (bulkForm) {
+            bulkForm.addEventListener('change', function(e){
+                if (e.target.classList && e.target.classList.contains('veyra-smr-cb')) { updateCount(); }
+            });
+            bulkForm.addEventListener('submit', function(e){
+                var n = selectedCount();
+                if (n === 0) {
+                    e.preventDefault();
+                    alert('No redirects selected. Tick the checkboxes for the redirects you want to delete.');
+                    return;
+                }
+                if (!confirm('⚠️  Delete ' + n + ' selected redirect(s)?\n\nThis permanently removes them and cannot be undone.')) {
+                    e.preventDefault();
+                    return;
+                }
+                if (!confirm('Are you ABSOLUTELY sure?\n\nClick OK to permanently delete ' + n + ' redirect(s).')) {
+                    e.preventDefault();
+                    return;
+                }
+            });
+        }
+    })();
+    </script>
+    <?php
+}
