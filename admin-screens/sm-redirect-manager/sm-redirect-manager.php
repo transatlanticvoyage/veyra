@@ -303,6 +303,14 @@ function veyra_smr_handle_actions() {
         wp_safe_redirect(admin_url('admin.php?page=sm_redirect_manager&generated=' . intval($n)));
         exit;
     }
+
+    // Independent feature: designate the "harper page" (link-coagulation target).
+    // Stored as a published page ID in the verya_harper_page_for_link_coagulation option.
+    if (isset($_POST['verya_harper_save']) && check_admin_referer('verya_harper_save', 'verya_harper_nonce')) {
+        update_option('verya_harper_page_for_link_coagulation', intval($_POST['verya_harper_page_for_link_coagulation'] ?? 0));
+        wp_safe_redirect(admin_url('admin.php?page=sm_redirect_manager&harper_saved=1'));
+        exit;
+    }
 }
 
 /** Import a CSV of: source_url, target_url, redirect_type(optional). */
@@ -390,6 +398,7 @@ function veyra_smr_render_page() {
         if (isset($_GET['deleted']))   { echo '<p class="veyra-smr-msg">Deleted ' . intval($_GET['deleted']) . ' redirect(s).</p>'; }
         if (isset($_GET['imported']))  { echo '<p class="veyra-smr-msg">Imported ' . intval($_GET['imported']) . ' redirect(s).</p>'; }
         if (isset($_GET['generated'])) { echo '<p class="veyra-smr-msg">Generated ' . intval($_GET['generated']) . ' redirect(s) from Structure-Medic data.</p>'; }
+        if (isset($_GET['harper_saved'])) { echo '<p class="veyra-smr-msg">Harper page saved.</p>'; }
         ?>
 
         <p><button type="button" class="button button-primary" id="veyra-smr-new">Create New</button></p>
@@ -414,6 +423,40 @@ function veyra_smr_render_page() {
                     <button type="submit" name="veyra_smr_save" value="1" class="button button-primary"><?php echo $edit ? 'Update Redirect' : 'Save Redirect'; ?></button>
                     <a href="<?php echo esc_url($base); ?>" class="button">Cancel</a>
                 </p>
+            </form>
+        </div>
+
+        <?php
+        // ---- Independent feature: designate the "harper page" (link-coagulation target) ----
+        $harper_current = (int) get_option('verya_harper_page_for_link_coagulation', 0);
+        $harper_pages   = get_posts(array(
+            'post_type'   => 'page',
+            'post_status' => 'publish',
+            'numberposts' => -1,
+            'orderby'     => 'title',
+            'order'       => 'ASC',
+        ));
+        ?>
+        <div class="veyra-harper" style="margin:18px 0;padding:14px 16px;border:1px solid #c3c4c7;background:#fff;border-radius:4px;max-width:820px">
+            <p style="margin:0 0 4px"><code style="font-size:13px">verya_harper_page_for_link_coagulation</code></p>
+            <p style="margin:0 0 10px;color:#646970">Designate the <strong>harper page</strong> &mdash; the default page used for link coagulation (redirect target for link juice).</p>
+            <form method="post">
+                <?php wp_nonce_field('verya_harper_save', 'verya_harper_nonce'); ?>
+                <select name="verya_harper_page_for_link_coagulation" style="min-width:560px;max-width:100%;padding:6px;font-family:monospace">
+                    <option value="0">&mdash; none &mdash;</option>
+                    <?php foreach ($harper_pages as $hp_pg):
+                        $hp_perm  = get_permalink($hp_pg->ID);
+                        $hp_title = ($hp_pg->post_title !== '') ? $hp_pg->post_title : '(no title)';
+                        $hp_label = $hp_title . '  —  ' . $hp_perm;
+                    ?>
+                        <option value="<?php echo intval($hp_pg->ID); ?>" <?php selected($harper_current, $hp_pg->ID); ?>><?php echo esc_html($hp_label); ?></option>
+                    <?php endforeach; ?>
+                </select>
+                <button type="submit" name="verya_harper_save" value="1" class="button button-primary">Save</button>
+                <?php if ($harper_current && ($hp_sel = get_post($harper_current)) && $hp_sel->post_status === 'publish'): ?>
+                    <p style="margin:10px 0 0;color:#1d2327">Current harper page: <strong><?php echo esc_html(get_the_title($hp_sel)); ?></strong> &mdash;
+                        <a href="<?php echo esc_url(get_permalink($hp_sel)); ?>" target="_blank"><?php echo esc_html(get_permalink($hp_sel)); ?></a></p>
+                <?php endif; ?>
             </form>
         </div>
 
