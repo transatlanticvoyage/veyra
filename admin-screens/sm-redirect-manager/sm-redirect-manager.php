@@ -428,8 +428,8 @@ function veyra_smr_render_page() {
                 <thead><tr>
                     <td class="check-column" style="width:2.2em"><input type="checkbox" id="veyra-smr-select-all" title="Select all"></td>
                     <th style="width:50px">id</th>
-                    <th style="width:60px" title="Majestic Trust Flow of the target page">mj_tf</th>
-                    <th style="width:70px" title="Majestic External Referring Domains of the target page">mj_rd</th>
+                    <th style="width:70px;border-left:1px solid gray;border-right:1px solid gray" title="Majestic External Referring Domains of the target page">mj_rd</th>
+                    <th style="width:60px;border-left:1px solid gray;border-right:1px solid gray" title="Majestic Trust Flow of the target page">mj_tf</th>
                     <th>source_path</th><th>target_url</th>
                     <th style="width:60px">type</th><th style="width:60px">active</th>
                     <th style="width:60px">hits</th><th style="width:120px">actions</th>
@@ -441,8 +441,8 @@ function veyra_smr_render_page() {
                     <tr>
                         <th scope="row" class="check-column"><input type="checkbox" class="veyra-smr-cb" name="ids[]" value="<?php echo intval($r->id); ?>"></th>
                         <td><?php echo intval($r->id); ?></td>
-                        <td><?php echo ($r->mj_tf !== null ? intval($r->mj_tf) : ''); ?></td>
-                        <td><?php echo ($r->mj_rd !== null ? intval($r->mj_rd) : ''); ?></td>
+                        <td style="border-left:1px solid gray;border-right:1px solid gray"><?php echo ($r->mj_rd !== null ? intval($r->mj_rd) : ''); ?></td>
+                        <td style="border-left:1px solid gray;border-right:1px solid gray"><strong><?php echo ($r->mj_tf !== null ? intval($r->mj_tf) : ''); ?></strong></td>
                         <td>
                             <button type="button" class="button button-small veyra-smr-open" data-url="<?php echo esc_attr(home_url($r->source_path)); ?>">open</button>
                             <button type="button" class="button button-small veyra-smr-copy" data-url="<?php echo esc_attr(home_url($r->source_path)); ?>">copy</button>
