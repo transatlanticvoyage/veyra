@@ -50,8 +50,6 @@ class Veyra {
         // Keep the admin-bar item's icon + label on one line (front-end & admin).
         add_action('wp_head', array($this, 'veyra_admin_bar_styles'));
         add_action('admin_head', array($this, 'veyra_admin_bar_styles'));
-        add_action('wp_enqueue_scripts', array($this, 'enqueue_scripts'));
-        add_action('admin_enqueue_scripts', array($this, 'enqueue_scripts'));
         add_action('wp_ajax_veyra_get_post_title', array($this, 'ajax_get_post_title'));
         add_action('wp_ajax_veyra_update_post_title', array($this, 'ajax_update_post_title'));
         add_action('wp_ajax_veyra_inject_replex_content', array($this, 'ajax_inject_replex_content'));
@@ -558,15 +556,9 @@ class Veyra {
             return;
         }
         
-        wp_enqueue_script('veyra-elephant-tools', VEYRA_PLUGIN_URL . 'assets/elephant-tools.js', array('jquery'), VEYRA_PLUGIN_VERSION . '.' . time(), true);
-        wp_enqueue_style('veyra-elephant-tools', VEYRA_PLUGIN_URL . 'assets/elephant-tools.css', array(), VEYRA_PLUGIN_VERSION . '.' . time());
+        // elephant-tools modal JS/CSS enqueue removed — no longer used (the admin-bar
+        // item is now the "Veyra Hub 1" dropdown). Method is no longer hooked.
         
-        wp_localize_script('veyra-elephant-tools', 'veyra_ajax', array(
-            'ajax_url' => admin_url('admin-ajax.php'),
-            'nonce' => wp_create_nonce('veyra_elephant_tools'),
-            'current_post_id' => get_queried_object_id(),
-            'plugin_url' => VEYRA_PLUGIN_URL
-        ));
     }
     
     public function ajax_get_post_title() {
