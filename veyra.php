@@ -499,17 +499,17 @@ class Veyra {
         <?php
     }
 
-    /** Prevent the "Veyra Elephant Tools" admin-bar label from wrapping below
-     *  its icon (which bled out of the 32px bar). Forces icon + text onto one
-     *  centered line. Printed only when the admin bar is showing. */
+    /** Prevent the "Veyra Hub 1" admin-bar label from wrapping below its icon
+     *  (which bled out of the 32px bar). Forces icon + text onto one centered
+     *  line. Printed only when the admin bar is showing. */
     public function veyra_admin_bar_styles() {
         if (!is_admin_bar_showing()) {
             return;
         }
         echo '<style id="veyra-adminbar-fix">'
-            . '#wpadminbar #wp-admin-bar-veyra-elephant-tools > .ab-item{'
+            . '#wpadminbar #wp-admin-bar-veyra-hub-1 > .ab-item{'
             . 'display:flex;align-items:center;white-space:nowrap;}'
-            . '#wpadminbar #wp-admin-bar-veyra-elephant-tools > .ab-item img{'
+            . '#wpadminbar #wp-admin-bar-veyra-hub-1 > .ab-item img{'
             . 'width:16px;height:16px;margin:0 6px 0 0;vertical-align:middle;flex:0 0 auto;}'
             . '</style>';
     }
@@ -518,17 +518,39 @@ class Veyra {
         if (!is_user_logged_in() || !current_user_can('edit_posts')) {
             return;
         }
-        
+
         $logo_svg = '<img src="' . VEYRA_PLUGIN_URL . 'assets/images/veyra-sun-logo.svg" style="width: 16px; height: 16px; margin-right: 6px; vertical-align: middle;" alt="Veyra Logo" />';
-        
+
+        // Top-level admin-bar item (formerly "Veyra Elephant Tools"): now "Veyra Hub 1",
+        // linking to the hub page and opening a dropdown that mirrors the wp-admin
+        // "Veyra Hub 1" sidebar submenu.
         $wp_admin_bar->add_node(array(
-            'id' => 'veyra-elephant-tools',
-            'title' => $logo_svg . 'Veyra Elephant Tools',
-            'href' => '#',
-            'meta' => array(
-                'onclick' => 'VeyraElephantTools.openModal(); return false;'
-            )
+            'id'    => 'veyra-hub-1',
+            'title' => $logo_svg . 'Veyra Hub 1',
+            'href'  => admin_url('admin.php?page=veyra-hub-1'),
         ));
+
+        // Submenu items under Veyra Hub 1. The admin menu ($submenu) is only built in
+        // wp-admin, so on the front end we list the hub's registered pages explicitly.
+        // Each: [ menu label, page slug, capability ].
+        $hub_items = array(
+            array('Veyra Hub 1',                    'veyra-hub-1',            'edit_posts'),
+            array('Veyra Post Importer From Birch', 'veyra_post_importer',    'edit_posts'),
+            array('SM Redirect Manager',            'sm_redirect_manager',    'manage_options'),
+            array('Custom Blog Feed',               'veyra_custom_blog_feed', 'manage_options'),
+            array('Plugin Manager',                 'veyra_plugin_manager',   'manage_options'),
+        );
+        foreach ($hub_items as $item) {
+            if (!current_user_can($item[2])) {
+                continue;
+            }
+            $wp_admin_bar->add_node(array(
+                'id'     => 'veyra-hub-1-' . $item[1],
+                'parent' => 'veyra-hub-1',
+                'title'  => $item[0],
+                'href'   => admin_url('admin.php?page=' . $item[1]),
+            ));
+        }
     }
     
     public function enqueue_scripts() {
