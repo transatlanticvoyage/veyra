@@ -21,6 +21,20 @@ define('VEYRA_PLUGIN_VERSION', '1.2.0');
 define('VEYRA_PLUGIN_PATH', plugin_dir_path(__FILE__));
 define('VEYRA_PLUGIN_URL', plugin_dir_url(__FILE__));
 
+/**
+ * Normalize fossil content before it is saved or rendered.
+ *
+ * Guards against LITERAL escape sequences ending up in the option value — e.g. a
+ * two-character backslash-n ("\n") instead of a real newline. These can sneak in
+ * when content is round-tripped through a tool that escapes newlines (mysql batch
+ * output, JSON, etc.); wpautop never converts them, so they show up as visible
+ * "\n\n" text on the page. We collapse "\r\n", "\n", "\r", "\t" literals to a
+ * single space so they can never render as garbage, regardless of how they got in.
+ */
+function veyra_clean_fossil_content($content) {
+    return str_replace(array("\\r\\n", "\\n", "\\r", "\\t"), ' ', (string) $content);
+}
+
 // Initialize plugin
 class Veyra {
     
@@ -175,13 +189,13 @@ class Veyra {
         $show_fossil = isset($_POST['veyra_show_fossil_content_on_blog_feed_page']) ? true : false;
         update_option('veyra_show_fossil_content_on_blog_feed_page', $show_fossil);
 
-        $fossil_content = isset($_POST['veyra_fossil_content']) ? wp_kses_post(wp_unslash($_POST['veyra_fossil_content'])) : '';
+        $fossil_content = isset($_POST['veyra_fossil_content']) ? veyra_clean_fossil_content(wp_kses_post(wp_unslash($_POST['veyra_fossil_content']))) : '';
         update_option('veyra_fossil_content', $fossil_content);
 
         $show_fossil_below = isset($_POST['veyra_show_fossil_content_below_feed_on_blog_feed_page']) ? true : false;
         update_option('veyra_show_fossil_content_below_feed_on_blog_feed_page', $show_fossil_below);
 
-        $fossil_content_below = isset($_POST['veyra_fossil_content_below_feed']) ? wp_kses_post(wp_unslash($_POST['veyra_fossil_content_below_feed'])) : '';
+        $fossil_content_below = isset($_POST['veyra_fossil_content_below_feed']) ? veyra_clean_fossil_content(wp_kses_post(wp_unslash($_POST['veyra_fossil_content_below_feed']))) : '';
         update_option('veyra_fossil_content_below_feed', $fossil_content_below);
 
         $hauser_emblem = isset($_POST['veyra_hauser_themes_header_emblem_text']) ? sanitize_text_field($_POST['veyra_hauser_themes_header_emblem_text']) : '';
@@ -220,19 +234,18 @@ class Veyra {
         if (!$query->is_main_query() || !is_home() || is_paged()) {
             return;
         }
-        $content = get_option('veyra_fossil_content', '');
+        $content = veyra_clean_fossil_content(get_option('veyra_fossil_content', ''));
         if (!empty($content)) {
-            $content = wp_unslash($content);
             echo '<div class="veyra-fossil-content">' . wpautop($content) . '</div>';
         }
     }
 
     private function fossil_below_html() {
-        $content = get_option('veyra_fossil_content_below_feed', '');
+        $content = veyra_clean_fossil_content(get_option('veyra_fossil_content_below_feed', ''));
         if (empty($content)) {
             return '';
         }
-        return '<div class="veyra-fossil-content veyra-fossil-content-below-feed">' . wpautop(wp_unslash($content)) . '</div>';
+        return '<div class="veyra-fossil-content veyra-fossil-content-below-feed">' . wpautop($content) . '</div>';
     }
 
     public function inject_fossil_content_below_feed($query) {
