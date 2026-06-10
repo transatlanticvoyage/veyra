@@ -311,6 +311,34 @@ function veyra_smr_handle_actions() {
         wp_safe_redirect(admin_url('admin.php?page=sm_redirect_manager&harper_saved=1'));
         exit;
     }
+
+    // Bulk update: re-point every redirect whose target matches a given URL/path to a new target.
+    // Matches by path (so "/about/", "/about", and "http://site/about/" all match the same rows);
+    // also re-resolves wp_post_id to the new target so the mj_tf/mj_rd columns stay correct.
+    if (isset($_POST['veyra_smr_bulk_target']) && check_admin_referer('veyra_smr_bulk_target', 'veyra_smr_bulk_target_nonce')) {
+        global $wpdb;
+        $old = trim((string) wp_unslash($_POST['bulk_old_target'] ?? ''));
+        $new = trim((string) wp_unslash($_POST['bulk_new_target'] ?? ''));
+        $count = 0;
+        if ($old !== '' && $new !== '') {
+            $old_path   = '/' . trim(strtolower((string) (parse_url($old, PHP_URL_PATH) ?: $old)), '/');
+            $new_target = preg_match('#^https?://#i', $new) ? $new : home_url('/' . ltrim($new, '/'));
+            $new_pid    = url_to_postid($new_target);
+            foreach ($wpdb->get_results("SELECT id, target_url FROM {$t}") as $row) {
+                $tp = '/' . trim(strtolower((string) (parse_url($row->target_url, PHP_URL_PATH) ?: $row->target_url)), '/');
+                if ($tp === $old_path) {
+                    $wpdb->update($t, array(
+                        'target_url' => $new_target,
+                        'wp_post_id' => ($new_pid ?: null),
+                        'updated_at' => current_time('mysql'),
+                    ), array('id' => intval($row->id)));
+                    $count++;
+                }
+            }
+        }
+        wp_safe_redirect(admin_url('admin.php?page=sm_redirect_manager&bulk_target_updated=' . intval($count)));
+        exit;
+    }
 }
 
 /** Import a CSV of: source_url, target_url, redirect_type(optional). */
@@ -399,6 +427,7 @@ function veyra_smr_render_page() {
         if (isset($_GET['imported']))  { echo '<p class="veyra-smr-msg">Imported ' . intval($_GET['imported']) . ' redirect(s).</p>'; }
         if (isset($_GET['generated'])) { echo '<p class="veyra-smr-msg">Generated ' . intval($_GET['generated']) . ' redirect(s) from Structure-Medic data.</p>'; }
         if (isset($_GET['harper_saved'])) { echo '<p class="veyra-smr-msg">Harper page saved.</p>'; }
+        if (isset($_GET['bulk_target_updated'])) { echo '<p class="veyra-smr-msg">Bulk-updated ' . intval($_GET['bulk_target_updated']) . ' redirect(s).</p>'; }
         ?>
 
         <p><button type="button" class="button button-primary" id="veyra-smr-new">Create New</button></p>
@@ -437,7 +466,8 @@ function veyra_smr_render_page() {
             'order'       => 'ASC',
         ));
         ?>
-        <div class="veyra-harper" style="margin:18px 0;padding:14px 16px;border:1px solid #c3c4c7;background:#fff;border-radius:4px;max-width:820px">
+        <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start;margin:18px 0;">
+        <div class="veyra-harper" style="padding:14px 16px;border:1px solid #c3c4c7;background:#fff;border-radius:4px;flex:1 1 520px">
             <p style="margin:0 0 4px"><code style="font-size:13px">verya_harper_page_for_link_coagulation</code></p>
             <p style="margin:0 0 10px;color:#646970">Designate the <strong>harper page</strong> &mdash; the default page used for link coagulation (redirect target for link juice).</p>
             <form method="post">
@@ -459,6 +489,24 @@ function veyra_smr_render_page() {
                 <?php endif; ?>
             </form>
         </div>
+
+        <div class="veyra-bulk-target" style="padding:14px 16px;border:1px solid #c3c4c7;background:#fff;border-radius:4px;flex:1 1 360px">
+            <p style="margin:0 0 4px;font-weight:600;font-size:14px">Bulk update all redirects for a specific target</p>
+            <p style="margin:0 0 12px;color:#646970;font-size:12px">Re-point every redirect whose target is the first URL to the second (path or full URL).</p>
+            <form method="post">
+                <?php wp_nonce_field('veyra_smr_bulk_target', 'veyra_smr_bulk_target_nonce'); ?>
+                <p style="margin:0 0 8px">
+                    <label style="display:block;font-size:12px;color:#646970;margin-bottom:2px">existing target_url</label>
+                    <input type="text" name="bulk_old_target" style="width:100%;padding:6px;font-family:monospace;box-sizing:border-box" placeholder="/about/">
+                </p>
+                <p style="margin:0 0 12px">
+                    <label style="display:block;font-size:12px;color:#646970;margin-bottom:2px">new target_url</label>
+                    <input type="text" name="bulk_new_target" style="width:100%;padding:6px;font-family:monospace;box-sizing:border-box" placeholder="/about-us/">
+                </p>
+                <button type="submit" name="veyra_smr_bulk_target" value="1" class="button button-primary">Execute changes</button>
+            </form>
+        </div>
+        </div><!-- /widget flex row -->
 
         <h2>Existing Redirects (<?php echo count($rows); ?>)</h2>
         <form method="post" id="veyra-smr-bulk-form">
