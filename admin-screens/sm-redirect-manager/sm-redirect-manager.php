@@ -339,6 +339,26 @@ function veyra_smr_handle_actions() {
         wp_safe_redirect(admin_url('admin.php?page=sm_redirect_manager&bulk_target_updated=' . intval($count)));
         exit;
     }
+
+    // Bulk update active status: set is_active on every redirect whose target matches (by path).
+    if (isset($_POST['veyra_smr_bulk_active']) && check_admin_referer('veyra_smr_bulk_active', 'veyra_smr_bulk_active_nonce')) {
+        global $wpdb;
+        $tgt    = trim((string) wp_unslash($_POST['bulk_active_target'] ?? ''));
+        $status = (($_POST['bulk_active_status'] ?? '0') === '1') ? 1 : 0;
+        $count  = 0;
+        if ($tgt !== '') {
+            $tgt_path = '/' . trim(strtolower((string) (parse_url($tgt, PHP_URL_PATH) ?: $tgt)), '/');
+            foreach ($wpdb->get_results("SELECT id, target_url FROM {$t}") as $row) {
+                $tp = '/' . trim(strtolower((string) (parse_url($row->target_url, PHP_URL_PATH) ?: $row->target_url)), '/');
+                if ($tp === $tgt_path) {
+                    $wpdb->update($t, array('is_active' => $status, 'updated_at' => current_time('mysql')), array('id' => intval($row->id)));
+                    $count++;
+                }
+            }
+        }
+        wp_safe_redirect(admin_url('admin.php?page=sm_redirect_manager&bulk_active_updated=' . intval($count)));
+        exit;
+    }
 }
 
 /** Import a CSV of: source_url, target_url, redirect_type(optional). */
@@ -428,6 +448,7 @@ function veyra_smr_render_page() {
         if (isset($_GET['generated'])) { echo '<p class="veyra-smr-msg">Generated ' . intval($_GET['generated']) . ' redirect(s) from Structure-Medic data.</p>'; }
         if (isset($_GET['harper_saved'])) { echo '<p class="veyra-smr-msg">Harper page saved.</p>'; }
         if (isset($_GET['bulk_target_updated'])) { echo '<p class="veyra-smr-msg">Bulk-updated ' . intval($_GET['bulk_target_updated']) . ' redirect(s).</p>'; }
+        if (isset($_GET['bulk_active_updated'])) { echo '<p class="veyra-smr-msg">Updated active status on ' . intval($_GET['bulk_active_updated']) . ' redirect(s).</p>'; }
         ?>
 
         <p><button type="button" class="button button-primary" id="veyra-smr-new">Create New</button></p>
@@ -467,12 +488,12 @@ function veyra_smr_render_page() {
         ));
         ?>
         <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start;margin:18px 0;">
-        <div class="veyra-harper" style="padding:14px 16px;border:1px solid #c3c4c7;background:#fff;border-radius:4px;flex:1 1 520px">
+        <div class="veyra-harper" style="padding:14px 16px;border:1px solid #c3c4c7;background:#fff;border-radius:4px;flex:1 1 300px">
             <p style="margin:0 0 4px"><code style="font-size:13px">verya_harper_page_for_link_coagulation</code></p>
             <p style="margin:0 0 10px;color:#646970">Designate the <strong>harper page</strong> &mdash; the default page used for link coagulation (redirect target for link juice).</p>
             <form method="post">
                 <?php wp_nonce_field('verya_harper_save', 'verya_harper_nonce'); ?>
-                <select name="verya_harper_page_for_link_coagulation" style="min-width:560px;max-width:100%;padding:6px;font-family:monospace">
+                <select name="verya_harper_page_for_link_coagulation" style="width:100%;max-width:100%;padding:6px;font-family:monospace;box-sizing:border-box">
                     <option value="0">&mdash; none &mdash;</option>
                     <?php foreach ($harper_pages as $hp_pg):
                         $hp_perm  = get_permalink($hp_pg->ID);
@@ -490,7 +511,7 @@ function veyra_smr_render_page() {
             </form>
         </div>
 
-        <div class="veyra-bulk-target" style="padding:14px 16px;border:1px solid #c3c4c7;background:#fff;border-radius:4px;flex:1 1 360px">
+        <div class="veyra-bulk-target" style="padding:14px 16px;border:1px solid #c3c4c7;background:#fff;border-radius:4px;flex:1 1 300px">
             <p style="margin:0 0 4px;font-weight:600;font-size:14px">Bulk update all redirects for a specific target</p>
             <p style="margin:0 0 12px;color:#646970;font-size:12px">Re-point every redirect whose target is the first URL to the second (path or full URL).</p>
             <form method="post">
@@ -504,6 +525,23 @@ function veyra_smr_render_page() {
                     <input type="text" name="bulk_new_target" style="width:100%;padding:6px;font-family:monospace;box-sizing:border-box" placeholder="/about-us/">
                 </p>
                 <button type="submit" name="veyra_smr_bulk_target" value="1" class="button button-primary">Execute changes</button>
+            </form>
+        </div>
+
+        <div class="veyra-bulk-active" style="padding:14px 16px;border:1px solid #c3c4c7;background:#fff;border-radius:4px;flex:1 1 300px">
+            <p style="margin:0 0 4px;font-weight:600;font-size:14px">Bulk update active status</p>
+            <p style="margin:0 0 12px;color:#646970;font-size:12px">Set every redirect with this target to active or inactive (path or full URL).</p>
+            <form method="post">
+                <?php wp_nonce_field('veyra_smr_bulk_active', 'veyra_smr_bulk_active_nonce'); ?>
+                <p style="margin:0 0 10px">
+                    <label style="display:block;font-size:12px;color:#646970;margin-bottom:2px">target_url</label>
+                    <input type="text" name="bulk_active_target" style="width:100%;padding:6px;font-family:monospace;box-sizing:border-box" placeholder="/harper/">
+                </p>
+                <p style="margin:0 0 12px;font-size:13px">
+                    <label style="margin-right:16px"><input type="radio" name="bulk_active_status" value="1"> active</label>
+                    <label><input type="radio" name="bulk_active_status" value="0" checked> inactive</label>
+                </p>
+                <button type="submit" name="veyra_smr_bulk_active" value="1" class="button button-primary">Execute changes</button>
             </form>
         </div>
         </div><!-- /widget flex row -->
@@ -529,7 +567,7 @@ function veyra_smr_render_page() {
                 <?php if (!$rows): ?>
                     <tr><td colspan="10">No redirects yet. Use <strong>Create New</strong>, import a CSV, or generate from Structure-Medic data below.</td></tr>
                 <?php else: foreach ($rows as $r): ?>
-                    <tr>
+                    <tr class="<?php echo $r->is_active ? '' : 'veyra-smr-inactive'; ?>">
                         <th scope="row" class="check-column"><input type="checkbox" class="veyra-smr-cb" name="ids[]" value="<?php echo intval($r->id); ?>"></th>
                         <td><?php echo intval($r->id); ?></td>
                         <td style="border-left:1px solid gray;border-right:1px solid gray"><?php echo ($r->mj_rd !== null ? intval($r->mj_rd) : ''); ?></td>
@@ -541,7 +579,7 @@ function veyra_smr_render_page() {
                         </td>
                         <td><a href="<?php echo esc_url($r->target_url); ?>" target="_blank"><?php echo esc_html($r->target_url); ?></a></td>
                         <td><?php echo intval($r->redirect_type); ?></td>
-                        <td><?php echo $r->is_active ? 'yes' : 'no'; ?></td>
+                        <td><?php echo $r->is_active ? 'yes' : '<span class="smr-status">inactive</span>'; ?></td>
                         <td><?php echo intval($r->hits); ?></td>
                         <td>
                             <a href="<?php echo esc_url(add_query_arg('edit', intval($r->id), $base)); ?>">edit</a> |
@@ -574,6 +612,12 @@ function veyra_smr_render_page() {
         .veyra-smr code{font-size:12px;}
         .veyra-smr table.wp-list-table thead th{cursor:pointer;}
         .veyra-smr .smr-arrow{color:#2271b1;}
+        .veyra-smr tr.veyra-smr-inactive > td,
+        .veyra-smr tr.veyra-smr-inactive > th{background:#fdecea !important;}
+        .veyra-smr tr.veyra-smr-inactive code,
+        .veyra-smr tr.veyra-smr-inactive a{color:#9a6a6a;}
+        .veyra-smr tr.veyra-smr-inactive code{text-decoration:line-through;}
+        .veyra-smr .smr-status{color:#b32d2e;font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.04em;}
     </style>
     <script>
     /* Sortable columns: click any column header to sort the table (client-side; the table
