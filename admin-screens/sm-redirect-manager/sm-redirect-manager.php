@@ -524,7 +524,59 @@ function veyra_smr_render_page() {
         .veyra-smr-msg{color:#0a7d28;font-weight:600;}
         .veyra-smr table.form-table th{width:220px;text-align:left;vertical-align:top;}
         .veyra-smr code{font-size:12px;}
+        .veyra-smr table.wp-list-table thead th{cursor:pointer;}
+        .veyra-smr .smr-arrow{color:#2271b1;}
     </style>
+    <script>
+    /* Sortable columns: click any column header to sort the table (client-side; the table
+       is unpaginated so this orders the full result set). Toggles asc/desc, auto-detects numbers. */
+    (function(){
+        var table = document.querySelector('.veyra-smr table.wp-list-table');
+        if (!table) { return; }
+        var headerRow = table.querySelector('thead tr');
+        if (!headerRow) { return; }
+        function cellVal(cell){
+            if (!cell) { return ''; }
+            var el = cell.querySelector('code, a');
+            return ((el ? el.textContent : cell.textContent) || '').trim();
+        }
+        headerRow.querySelectorAll('th').forEach(function(th){
+            if (th.textContent.trim().toLowerCase() === 'actions') { return; }
+            th.title = (th.title ? th.title + ' — ' : '') + 'click to sort';
+            th.addEventListener('click', function(){
+                var tbody = table.querySelector('tbody');
+                var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'))
+                    .filter(function(r){ return r.cells.length > 1; });
+                if (rows.length < 2) { return; }
+                var idx = th.cellIndex;
+                var dir = th.getAttribute('data-smr-dir') === 'asc' ? 'desc' : 'asc';
+                headerRow.querySelectorAll('th').forEach(function(o){
+                    o.removeAttribute('data-smr-dir');
+                    var a = o.querySelector('.smr-arrow'); if (a) { a.remove(); }
+                });
+                th.setAttribute('data-smr-dir', dir);
+                var numeric = rows.every(function(r){
+                    var v = cellVal(r.cells[idx]);
+                    return v === '' || /^-?\d+(\.\d+)?$/.test(v);
+                });
+                rows.sort(function(a, b){
+                    var va = cellVal(a.cells[idx]), vb = cellVal(b.cells[idx]);
+                    if (numeric) {
+                        var na = (va === '' ? -Infinity : parseFloat(va));
+                        var nb = (vb === '' ? -Infinity : parseFloat(vb));
+                        return dir === 'asc' ? na - nb : nb - na;
+                    }
+                    return dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+                });
+                rows.forEach(function(r){ tbody.appendChild(r); });
+                var arrow = document.createElement('span');
+                arrow.className = 'smr-arrow';
+                arrow.textContent = dir === 'asc' ? ' ▲' : ' ▼';
+                th.appendChild(arrow);
+            });
+        });
+    })();
+    </script>
     <script>
     (function(){
         var b = document.getElementById('veyra-smr-new');
