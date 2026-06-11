@@ -446,14 +446,15 @@ function veyra_smr_render_page() {
         if (!empty($p['fragment'])) { $out .= '#' . $p['fragment']; }
         return $out;
     };
+    // Target display: path only for internal targets, full URL only when external (off-site).
+    $smr_target_disp = function ($url) use ($smr_home_host, $smr_to_path) {
+        $h = (string) parse_url((string) $url, PHP_URL_HOST);
+        return ($h === '' || strcasecmp($h, $smr_home_host) === 0)
+            ? $smr_to_path($url)   // internal -> path only
+            : (string) $url;       // external -> keep full URL
+    };
     $src_display = $edit ? $smr_to_path($edit->source_url) : '';
-    $tgt_display = '';
-    if ($edit) {
-        $t_host      = (string) parse_url((string) $edit->target_url, PHP_URL_HOST);
-        $tgt_display = ($t_host === '' || strcasecmp($t_host, $smr_home_host) === 0)
-            ? $smr_to_path($edit->target_url)   // internal -> path only
-            : (string) $edit->target_url;       // external -> keep full URL
-    }
+    $tgt_display = $edit ? $smr_target_disp($edit->target_url) : '';
     $base = admin_url('admin.php?page=sm_redirect_manager');
     ?>
     <div class="wrap veyra-smr">
@@ -594,7 +595,7 @@ function veyra_smr_render_page() {
                             <button type="button" class="button button-small veyra-smr-copy" data-url="<?php echo esc_attr(home_url($r->source_path)); ?>">copy</button>
                             <code><?php echo esc_html($r->source_path); ?></code>
                         </td>
-                        <td><a href="<?php echo esc_url($r->target_url); ?>" target="_blank"><?php echo esc_html($r->target_url); ?></a></td>
+                        <td><a href="<?php echo esc_url($r->target_url); ?>" target="_blank"><?php echo esc_html($smr_target_disp($r->target_url)); ?></a></td>
                         <td><?php echo intval($r->redirect_type); ?></td>
                         <td><?php echo $r->is_active ? 'yes' : '<span class="smr-status">inactive</span>'; ?></td>
                         <td><?php echo intval($r->hits); ?></td>
