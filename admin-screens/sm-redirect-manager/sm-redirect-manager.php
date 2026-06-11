@@ -437,6 +437,23 @@ function veyra_smr_render_page() {
     if (isset($_GET['edit'])) {
         $edit = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$t} WHERE id=%d", intval($_GET['edit'])));
     }
+    // Edit-form display: show clean paths; only show a full URL when the target is external (off-site).
+    $smr_home_host = (string) parse_url(home_url(), PHP_URL_HOST);
+    $smr_to_path = static function ($url) {
+        $p   = parse_url((string) $url);
+        $out = (isset($p['path']) && $p['path'] !== '') ? $p['path'] : '/';
+        if (!empty($p['query']))    { $out .= '?' . $p['query']; }
+        if (!empty($p['fragment'])) { $out .= '#' . $p['fragment']; }
+        return $out;
+    };
+    $src_display = $edit ? $smr_to_path($edit->source_url) : '';
+    $tgt_display = '';
+    if ($edit) {
+        $t_host      = (string) parse_url((string) $edit->target_url, PHP_URL_HOST);
+        $tgt_display = ($t_host === '' || strcasecmp($t_host, $smr_home_host) === 0)
+            ? $smr_to_path($edit->target_url)   // internal -> path only
+            : (string) $edit->target_url;       // external -> keep full URL
+    }
     $base = admin_url('admin.php?page=sm_redirect_manager');
     ?>
     <div class="wrap veyra-smr">
@@ -458,10 +475,10 @@ function veyra_smr_render_page() {
                 <?php wp_nonce_field('veyra_smr_save', 'veyra_smr_nonce'); ?>
                 <input type="hidden" name="id" value="<?php echo $edit ? intval($edit->id) : 0; ?>">
                 <table class="form-table">
-                    <tr><th>source_url <span style="font-weight:400">(old URL or path)</span></th>
-                        <td><input type="text" name="source_url" style="width:100%" value="<?php echo $edit ? esc_attr($edit->source_url) : ''; ?>"></td></tr>
-                    <tr><th>target_url <span style="font-weight:400">(new URL)</span></th>
-                        <td><input type="text" name="target_url" style="width:100%" value="<?php echo $edit ? esc_attr($edit->target_url) : ''; ?>"></td></tr>
+                    <tr><th>source_url <span style="font-weight:400">(path on the old site)</span></th>
+                        <td><input type="text" name="source_url" style="width:100%" value="<?php echo esc_attr($src_display); ?>"></td></tr>
+                    <tr><th>target_url <span style="font-weight:400">(path; full URL only if redirecting off-site)</span></th>
+                        <td><input type="text" name="target_url" style="width:100%" value="<?php echo esc_attr($tgt_display); ?>"></td></tr>
                     <tr><th>redirect_type</th>
                         <td><input type="number" name="redirect_type" style="width:90px" value="<?php echo $edit ? intval($edit->redirect_type) : 301; ?>"> <span style="font-weight:400">301 by default</span></td></tr>
                     <tr><th>is_active</th>
