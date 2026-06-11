@@ -433,6 +433,26 @@ function veyra_smr_render_page() {
          GROUP BY r.id
          ORDER BY r.id DESC"
     );
+
+    // ---- Filters: exact path match; trailing slash optional ("/good-stuff" == "/good-stuff/");
+    //      "/" = homepage. The two filters are independent and can be combined. ----
+    $f_target = isset($_GET['f_target']) ? trim((string) wp_unslash($_GET['f_target'])) : '';
+    $f_source = isset($_GET['f_source']) ? trim((string) wp_unslash($_GET['f_source'])) : '';
+    $smr_norm_match = static function ($v) {
+        $p = parse_url((string) $v, PHP_URL_PATH);
+        if ($p === null || $p === false || $p === '') { $p = (string) $v; }
+        $p = rtrim('/' . ltrim((string) $p, '/'), '/');
+        return strtolower($p === '' ? '/' : $p);
+    };
+    if (is_array($rows) && $f_target !== '') {
+        $ftn  = $smr_norm_match($f_target);
+        $rows = array_values(array_filter($rows, function ($r) use ($smr_norm_match, $ftn) { return $smr_norm_match($r->target_url) === $ftn; }));
+    }
+    if (is_array($rows) && $f_source !== '') {
+        $fsn  = $smr_norm_match($f_source);
+        $rows = array_values(array_filter($rows, function ($r) use ($smr_norm_match, $fsn) { return $smr_norm_match($r->source_path) === $fsn; }));
+    }
+
     $edit = null;
     if (isset($_GET['edit'])) {
         $edit = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$t} WHERE id=%d", intval($_GET['edit'])));
@@ -564,6 +584,32 @@ function veyra_smr_render_page() {
         </div>
         </div><!-- /widget flex row -->
 
+        <div class="veyra-smr-filter" style="margin:18px 0;padding:14px 16px;border:1px solid #c3c4c7;background:#fff;border-radius:4px;max-width:680px">
+            <p style="margin:0 0 10px;font-weight:600;font-size:14px">Filter redirects <span style="font-weight:400;color:#646970;font-size:12px">(exact match; trailing slash optional; use <code>/</code> for the homepage)</span></p>
+            <form method="get" style="display:flex;gap:8px;align-items:center;margin:0 0 8px">
+                <input type="hidden" name="page" value="sm_redirect_manager">
+                <input type="hidden" name="f_source" value="<?php echo esc_attr($f_source); ?>">
+                <label style="width:140px;font-size:13px">filter by target_url</label>
+                <input type="text" name="f_target" value="<?php echo esc_attr($f_target); ?>" placeholder="/  or  /good-stuff" style="flex:1;padding:6px;font-family:monospace;box-sizing:border-box">
+                <button type="submit" class="button">Submit</button>
+            </form>
+            <form method="get" style="display:flex;gap:8px;align-items:center;margin:0">
+                <input type="hidden" name="page" value="sm_redirect_manager">
+                <input type="hidden" name="f_target" value="<?php echo esc_attr($f_target); ?>">
+                <label style="width:140px;font-size:13px">filter by source_url</label>
+                <input type="text" name="f_source" value="<?php echo esc_attr($f_source); ?>" placeholder="/  or  /good-stuff" style="flex:1;padding:6px;font-family:monospace;box-sizing:border-box">
+                <button type="submit" class="button">Submit</button>
+            </form>
+            <?php if ($f_target !== '' || $f_source !== ''): ?>
+                <p style="margin:10px 0 0;font-size:12px;color:#646970">
+                    Showing <strong><?php echo count($rows); ?></strong> match<?php echo count($rows) === 1 ? '' : 'es'; ?>
+                    <?php if ($f_target !== ''): ?> &nbsp;|&nbsp; target = <code><?php echo esc_html($f_target); ?></code><?php endif; ?>
+                    <?php if ($f_source !== ''): ?> &nbsp;|&nbsp; source = <code><?php echo esc_html($f_source); ?></code><?php endif; ?>
+                    &nbsp;&mdash;&nbsp; <a href="<?php echo esc_url($base); ?>">clear filters</a>
+                </p>
+            <?php endif; ?>
+        </div>
+
         <h2>Existing Redirects (<?php echo count($rows); ?>)</h2>
         <form method="post" id="veyra-smr-bulk-form">
             <?php wp_nonce_field('veyra_smr_bulk_delete', 'veyra_smr_bulk_nonce'); ?>
@@ -636,6 +682,9 @@ function veyra_smr_render_page() {
         .veyra-smr tr.veyra-smr-inactive a{color:#9a6a6a;}
         .veyra-smr tr.veyra-smr-inactive code{text-decoration:line-through;}
         .veyra-smr .smr-status{color:#b32d2e;font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.04em;}
+        /* Selected rows (checkbox ticked) — light blue, overrides stripe + inactive tint. */
+        .veyra-smr tr.veyra-smr-row-selected > td,
+        .veyra-smr tr.veyra-smr-row-selected > th{background:#d6e9ff !important;}
     </style>
     <script>
     /* Sortable columns: click any column header to sort the table (client-side; the table
@@ -729,6 +778,11 @@ function veyra_smr_render_page() {
                 selectAll.checked = (total > 0 && n === total);
                 selectAll.indeterminate = (n > 0 && n < total);
             }
+            // Light-blue highlight on each selected row.
+            cbs().forEach(function(c){
+                var tr = c.closest('tr');
+                if (tr) { tr.classList.toggle('veyra-smr-row-selected', c.checked); }
+            });
         }
         if (selectAll) {
             selectAll.addEventListener('change', function(){
