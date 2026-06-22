@@ -677,21 +677,21 @@ function veyra_post_importer_render_page() {
             <fieldset style="margin-bottom: 16px;">
                 <legend style="font-weight: 600; margin-bottom: 6px;">Post status</legend>
                 <label style="margin-right: 16px;">
-                    <input type="radio" name="veyra_post_status" value="draft" checked /> draft
+                    <input type="radio" name="veyra_post_status" value="draft" /> draft
                 </label>
                 <label>
-                    <input type="radio" name="veyra_post_status" value="publish" /> publish
+                    <input type="radio" name="veyra_post_status" value="publish" checked /> publish
                 </label>
             </fieldset>
 
             <fieldset style="margin-bottom: 16px;">
                 <legend style="font-weight: 600; margin-bottom: 6px;">IMAGE DISPLAY OPTIONS</legend>
                 <label style="display: block; margin-bottom: 4px;">
-                    <input type="radio" name="veyra_image_display" value="plain" checked />
+                    <input type="radio" name="veyra_image_display" value="plain" />
                     nothing special (default - current system)
                 </label>
                 <label style="display: block;">
-                    <input type="radio" name="veyra_image_display" value="wp_medium" />
+                    <input type="radio" name="veyra_image_display" value="wp_medium" checked />
                     use medium wp native settings
                 </label>
                 <p style="color: #666; font-size: 12px; margin-top: 4px;">
