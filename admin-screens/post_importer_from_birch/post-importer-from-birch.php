@@ -129,6 +129,7 @@ function veyra_post_importer_handle_submit() {
     $post_type   = (isset($_POST['veyra_post_type']) && $_POST['veyra_post_type'] === 'page') ? 'page' : 'post';
     $post_status = (isset($_POST['veyra_post_status']) && $_POST['veyra_post_status'] === 'publish') ? 'publish' : 'draft';
     $image_style = (isset($_POST['veyra_image_display']) && $_POST['veyra_image_display'] === 'wp_medium') ? 'wp_medium' : 'plain';
+    $alignment_mode = veyra_post_importer_resolve_alignment_mode($_POST['veyra_image_alignment'] ?? 'global_random_3');
 
     $tmp_zip = $_FILES['veyra_pack']['tmp_name'];
 
@@ -199,7 +200,7 @@ function veyra_post_importer_handle_submit() {
 
     // Upsert: update an existing post if one is already associated with this backlink_id,
     // otherwise create a new one. (Stores tregnar_associated_linksharn_backlink_id meta.)
-    $res = veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style);
+    $res = veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode);
     if (!empty($res['error'])) {
         return ['level' => 'error', 'message' => $res['error']];
     }
@@ -244,8 +245,8 @@ function veyra_post_importer_find_post_by_backlink_id($backlink_id) {
  * permalink is re-rendered (post_name regenerated from the new title). Otherwise a new
  * post is created. The association meta is always (re)written.
  */
-function veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style) {
-    $content_with_images = veyra_post_importer_insert_images($parsed['page_content'], $image_assets, $image_style);
+function veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode = 'global_random_3') {
+    $content_with_images = veyra_post_importer_insert_images($parsed['page_content'], $image_assets, $image_style, $alignment_mode);
     $title       = $parsed['page_title'] ?: 'Birch Import (' . current_time('Y-m-d H:i') . ')';
     $backlink_id = isset($parsed['linksharn_backlink_id']) ? trim($parsed['linksharn_backlink_id']) : '';
 
@@ -378,6 +379,7 @@ function veyra_post_importer_handle_bulk_submit() {
     $post_type   = (isset($_POST['veyra_post_type']) && $_POST['veyra_post_type'] === 'page') ? 'page' : 'post';
     $post_status = (isset($_POST['veyra_post_status']) && $_POST['veyra_post_status'] === 'publish') ? 'publish' : 'draft';
     $image_style = (isset($_POST['veyra_image_display']) && $_POST['veyra_image_display'] === 'wp_medium') ? 'wp_medium' : 'plain';
+    $alignment_mode = veyra_post_importer_resolve_alignment_mode($_POST['veyra_image_alignment'] ?? 'global_random_3');
 
     $zip = new ZipArchive();
     if ($zip->open($_FILES['veyra_pack']['tmp_name']) !== true) {
@@ -422,7 +424,7 @@ function veyra_post_importer_handle_bulk_submit() {
         if ($bid !== '') $seen_ids[$bid] = true;
 
         $image_assets = veyra_post_importer_extract_zip_images($zip, $parts['images']);
-        $res = veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style);
+        $res = veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode);
         if (!empty($res['error'])) {
             $results[] = ['error' => $res['error'], 'title' => $parsed['page_title'], 'folder' => $folder];
             $skipped++;
@@ -509,12 +511,12 @@ function veyra_post_importer_parse_article_txt($raw) {
  * Content in our system is usually a mix of bare-text paragraphs separated
  * by blank lines, plus occasional <h2>/<h3> tags and inline anchors.
  */
-function veyra_post_importer_insert_images($content, array $image_assets, $style = 'plain') {
+function veyra_post_importer_insert_images($content, array $image_assets, $style = 'plain', $alignment_mode = 'global_random_3') {
     if (empty($image_assets)) return $content;
     if ($content === '') {
         $out = [];
         foreach ($image_assets as $asset) {
-            $out[] = veyra_post_importer_format_image_block($asset, $style);
+            $out[] = veyra_post_importer_format_image_block($asset, $style, $alignment_mode);
         }
         return implode("\n\n", $out);
     }
@@ -540,7 +542,7 @@ function veyra_post_importer_insert_images($content, array $image_assets, $style
         // Fallback: no safe positions — just append all images at the end
         $appended = $content;
         foreach ($image_assets as $asset) {
-            $appended .= "\n\n" . veyra_post_importer_format_image_block($asset, $style);
+            $appended .= "\n\n" . veyra_post_importer_format_image_block($asset, $style, $alignment_mode);
         }
         return $appended;
     }
@@ -561,7 +563,7 @@ function veyra_post_importer_insert_images($content, array $image_assets, $style
     foreach ($segments as $i => $seg) {
         $rebuilt[] = $seg;
         if (isset($img_by_idx[$i])) {
-            $rebuilt[] = veyra_post_importer_format_image_block($img_by_idx[$i], $style);
+            $rebuilt[] = veyra_post_importer_format_image_block($img_by_idx[$i], $style, $alignment_mode);
         }
     }
 
@@ -569,11 +571,67 @@ function veyra_post_importer_insert_images($content, array $image_assets, $style
     $used = count($take);
     $remaining = array_slice($image_assets, $used);
     foreach ($remaining as $asset) {
-        $rebuilt[] = veyra_post_importer_format_image_block($asset, $style);
+        $rebuilt[] = veyra_post_importer_format_image_block($asset, $style, $alignment_mode);
     }
 
     // Join with blank-line separators — guarantees visual spacing in code view
     return implode("\n\n", $rebuilt);
+}
+
+/**
+ * Resolve the raw ALIGNMENT OPTIONS POST value into an "effective" alignment_mode
+ * threaded through upsert_post() → insert_images() → format_image_block().
+ * The effective mode is either one of the two per-image-random tokens (resolved
+ * fresh for every image), or a literal alignment class name (already resolved —
+ * covers both the always-fixed options AND the "one random pick used everywhere"
+ * option, whose random choice is made exactly once, right here, per form submit —
+ * not once per image or per post).
+ */
+function veyra_post_importer_resolve_alignment_mode($raw) {
+    switch ($raw) {
+        case 'per_image_random_4':
+        case 'per_image_random_3':
+            return $raw;
+        case 'fixed_left':
+            return 'alignleft';
+        case 'fixed_right':
+            return 'alignright';
+        case 'fixed_center':
+            return 'aligncenter';
+        case 'fixed_none':
+        case 'alignnone':
+            return 'alignnone';
+        case 'global_random_3':
+        default:
+            // Default option: pick ONE of alignleft/alignright/aligncenter ONCE per
+            // submission, and that same class is reused for every image in every
+            // post processed by this run (single f5607 import = its one post;
+            // bulk f5608 import = every post in the zip).
+            $choices = ['alignleft', 'alignright', 'aligncenter'];
+            return $choices[array_rand($choices)];
+    }
+}
+
+/**
+ * Pick the WP alignment class for one image, per the resolved alignment_mode.
+ * $alignment_mode (already resolved by veyra_post_importer_resolve_alignment_mode()):
+ *   - 'per_image_random_4' → randomly one of alignleft / alignright / aligncenter / alignnone, per image
+ *   - 'per_image_random_3' → randomly one of alignleft / alignright / alignnone (no aligncenter), per image
+ *   - anything else        → treated as an already-resolved, literal fixed class name
+ */
+function veyra_post_importer_pick_alignment_class($alignment_mode = 'global_random_3') {
+    if ($alignment_mode === 'per_image_random_4') {
+        $choices = ['alignleft', 'alignright', 'aligncenter', 'alignnone'];
+        return $choices[array_rand($choices)];
+    }
+    if ($alignment_mode === 'per_image_random_3') {
+        $choices = ['alignleft', 'alignright', 'alignnone'];
+        return $choices[array_rand($choices)];
+    }
+    if (in_array($alignment_mode, ['alignleft', 'alignright', 'aligncenter', 'alignnone'], true)) {
+        return $alignment_mode;
+    }
+    return 'alignnone'; // safe fallback
 }
 
 /**
@@ -583,24 +641,26 @@ function veyra_post_importer_insert_images($content, array $image_assets, $style
  * $style:
  *   - 'plain'         → hand-rolled <img src alt /> using the full-size URL (default)
  *   - 'wp_medium'     → native WP markup via wp_get_attachment_image() at the
- *                       "medium" size, with alignnone + size-medium + wp-image-{ID}
+ *                       "medium" size, with {align} + size-medium + wp-image-{ID}
  *                       classes — matches what the WP media-library popup
  *                       inserts when user picks "Medium" size.
+ * $alignment_mode: see veyra_post_importer_pick_alignment_class() — applies to both styles.
  */
-function veyra_post_importer_format_image_block($asset, $style = 'plain') {
-    $url = isset($asset['url']) ? $asset['url'] : '';
-    $alt = isset($asset['alt']) ? $asset['alt'] : '';
-    $id  = isset($asset['id'])  ? $asset['id']  : null;
+function veyra_post_importer_format_image_block($asset, $style = 'plain', $alignment_mode = 'global_random_3') {
+    $url   = isset($asset['url']) ? $asset['url'] : '';
+    $alt   = isset($asset['alt']) ? $asset['alt'] : '';
+    $id    = isset($asset['id'])  ? $asset['id']  : null;
+    $align = veyra_post_importer_pick_alignment_class($alignment_mode);
 
     if ($style === 'wp_medium' && $id && function_exists('wp_get_attachment_image')) {
         // wp_get_attachment_image auto-adds 'wp-image-{ID}' class + width/height
-        // attrs + srcset/sizes when applicable. We add 'alignnone size-medium'
+        // attrs + srcset/sizes when applicable. We add '{align} size-medium'
         // to mirror what the native media-library popup generates on insert.
         $html = wp_get_attachment_image(
             $id,
             'medium',
             false,
-            ['class' => 'alignnone size-medium wp-image-' . (int) $id]
+            ['class' => $align . ' size-medium wp-image-' . (int) $id]
         );
         if (is_string($html) && $html !== '') {
             return $html;
@@ -608,8 +668,8 @@ function veyra_post_importer_format_image_block($asset, $style = 'plain') {
         // Fall through to plain if WP returned empty for some reason
     }
 
-    // Plain / fallback behavior (original system)
-    return '<img src="' . esc_url($url) . '" alt="' . esc_attr($alt) . '" />';
+    // Plain / fallback behavior (original system) — still carries the alignment class
+    return '<img src="' . esc_url($url) . '" alt="' . esc_attr($alt) . '" class="' . esc_attr($align) . '" />';
 }
 
 // ---------------------------------------------------------------------------
@@ -696,7 +756,46 @@ function veyra_post_importer_render_page() {
                 </label>
                 <p style="color: #666; font-size: 12px; margin-top: 4px;">
                     <code>nothing special</code> = <code>&lt;img src alt /&gt;</code> using the full-size URL.<br>
-                    <code>use medium wp native settings</code> = emits via <code>wp_get_attachment_image($id, 'medium', …)</code> with <code>class="alignnone size-medium wp-image-{ID}"</code> + explicit width/height — identical to what the WP media-library popup generates when you pick "Medium".
+                    <code>use medium wp native settings</code> = emits via <code>wp_get_attachment_image($id, 'medium', …)</code> with <code>class="{align} size-medium wp-image-{ID}"</code> + explicit width/height — identical to what the WP media-library popup generates when you pick "Medium".
+                </p>
+            </fieldset>
+
+            <fieldset style="margin-bottom: 16px;">
+                <legend style="font-weight: 600; margin-bottom: 6px;">ALIGNMENT OPTIONS</legend>
+                <label style="display: block; margin-bottom: 4px;">
+                    <input type="radio" name="veyra_image_alignment" value="global_random_3" checked />
+                    randomly choose alignleft/alignright/aligncenter and use for all images in all posts
+                </label>
+                <label style="display: block; margin-bottom: 4px;">
+                    <input type="radio" name="veyra_image_alignment" value="per_image_random_4" />
+                    randomly pick alignleft/alignright/aligncenter/alignnone for each image
+                </label>
+                <label style="display: block; margin-bottom: 4px;">
+                    <input type="radio" name="veyra_image_alignment" value="per_image_random_3" />
+                    randomly choose from alignleft/alignright/alignnone for each individual image
+                </label>
+                <label style="display: block; margin-bottom: 4px;">
+                    <input type="radio" name="veyra_image_alignment" value="alignnone" />
+                    use alignnone for every image
+                </label>
+                <label style="display: block; margin-bottom: 4px;">
+                    <input type="radio" name="veyra_image_alignment" value="fixed_none" />
+                    use alignnone on all images in all posts
+                </label>
+                <label style="display: block; margin-bottom: 4px;">
+                    <input type="radio" name="veyra_image_alignment" value="fixed_left" />
+                    use alignleft on all images in all posts
+                </label>
+                <label style="display: block; margin-bottom: 4px;">
+                    <input type="radio" name="veyra_image_alignment" value="fixed_right" />
+                    use alignright on all images in all posts
+                </label>
+                <label style="display: block;">
+                    <input type="radio" name="veyra_image_alignment" value="fixed_center" />
+                    use aligncenter on all images in all posts
+                </label>
+                <p style="color: #666; font-size: 12px; margin-top: 4px;">
+                    The top option (default) picks one alignment ONCE per import and applies it to every image in every post processed by that import — it does not vary image-to-image or post-to-post.
                 </p>
             </fieldset>
 
