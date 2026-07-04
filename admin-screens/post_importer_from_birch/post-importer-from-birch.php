@@ -246,6 +246,14 @@ function veyra_post_importer_find_post_by_backlink_id($backlink_id) {
  * post is created. The association meta is always (re)written.
  */
 function veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode = 'global_random_3') {
+    // "per_post_random_3" is resolved HERE, once per post: pick one of
+    // alignleft/alignright/aligncenter for THIS post only, and reuse it for
+    // every image in this post. A different post in the same bulk import
+    // rolls its own independent pick (this function runs once per post).
+    if ($alignment_mode === 'per_post_random_3') {
+        $choices = ['alignleft', 'alignright', 'aligncenter'];
+        $alignment_mode = $choices[array_rand($choices)];
+    }
     $content_with_images = veyra_post_importer_insert_images($parsed['page_content'], $image_assets, $image_style, $alignment_mode);
     $title       = $parsed['page_title'] ?: 'Birch Import (' . current_time('Y-m-d H:i') . ')';
     $backlink_id = isset($parsed['linksharn_backlink_id']) ? trim($parsed['linksharn_backlink_id']) : '';
@@ -581,16 +589,21 @@ function veyra_post_importer_insert_images($content, array $image_assets, $style
 /**
  * Resolve the raw ALIGNMENT OPTIONS POST value into an "effective" alignment_mode
  * threaded through upsert_post() → insert_images() → format_image_block().
- * The effective mode is either one of the two per-image-random tokens (resolved
- * fresh for every image), or a literal alignment class name (already resolved —
- * covers both the always-fixed options AND the "one random pick used everywhere"
- * option, whose random choice is made exactly once, right here, per form submit —
- * not once per image or per post).
+ * The effective mode is one of:
+ *   - the two per-image-random tokens (resolved fresh for every image)
+ *   - the per-post-random token (passed through here unresolved; upsert_post()
+ *     resolves it once per post, since this function only runs once per form
+ *     submit and can't know post boundaries in a bulk import)
+ *   - a literal alignment class name (already resolved — covers both the
+ *     always-fixed options AND the "one random pick used everywhere" option,
+ *     whose random choice is made exactly once, right here, per form submit —
+ *     not once per image or per post).
  */
 function veyra_post_importer_resolve_alignment_mode($raw) {
     switch ($raw) {
         case 'per_image_random_4':
         case 'per_image_random_3':
+        case 'per_post_random_3':
             return $raw;
         case 'fixed_left':
             return 'alignleft';
@@ -747,11 +760,11 @@ function veyra_post_importer_render_page() {
             <fieldset style="margin-bottom: 16px;">
                 <legend style="font-weight: 600; margin-bottom: 6px;">IMAGE DISPLAY OPTIONS</legend>
                 <label style="display: block; margin-bottom: 4px;">
-                    <input type="radio" name="veyra_image_display" value="plain" />
+                    <input type="radio" name="veyra_image_display" value="plain" checked />
                     nothing special (default - current system)
                 </label>
                 <label style="display: block;">
-                    <input type="radio" name="veyra_image_display" value="wp_medium" checked />
+                    <input type="radio" name="veyra_image_display" value="wp_medium" />
                     use medium wp native settings
                 </label>
                 <p style="color: #666; font-size: 12px; margin-top: 4px;">
@@ -765,6 +778,10 @@ function veyra_post_importer_render_page() {
                 <label style="display: block; margin-bottom: 4px;">
                     <input type="radio" name="veyra_image_alignment" value="global_random_3" checked />
                     randomly choose alignleft/alignright/aligncenter and use for all images in all posts
+                </label>
+                <label style="display: block; margin-bottom: 4px;">
+                    <input type="radio" name="veyra_image_alignment" value="per_post_random_3" />
+                    &#9733; for each post, randomly choose one of these: alignleft/alignright/aligncenter, and use that for all images in that particular post
                 </label>
                 <label style="display: block; margin-bottom: 4px;">
                     <input type="radio" name="veyra_image_alignment" value="per_image_random_4" />
