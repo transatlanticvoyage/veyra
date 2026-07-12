@@ -94,6 +94,14 @@ class Veyra {
         // inside the post form, so native Save/Publish persists them via save_post.
         add_action('edit_form_top', array($this, 'veyra_sm_render_editor_bar'));
         add_action('save_post', array($this, 'veyra_sm_save_editor'), 10, 2);
+
+        // Content-species post-editor panel: a second full-width bar (same style
+        // as the sm bar above) for tagging what "species" of content this page
+        // holds. Backed by a single wp_option ('veyra_content_species') keyed by
+        // post ID, so each page/post owns exactly one entry in that option.
+        add_action('edit_form_top', array($this, 'veyra_species_render_editor_bar'));
+        add_action('save_post', array($this, 'veyra_species_save_editor'), 10, 2);
+
         add_action('admin_print_styles-post.php', array($this, 'veyra_sm_editor_styles'));
         add_action('admin_print_styles-post-new.php', array($this, 'veyra_sm_editor_styles'));
         add_action('admin_print_footer_scripts', array($this, 'veyra_sm_editor_js'));
@@ -1397,6 +1405,58 @@ class Veyra {
         return $updated;
     }
 
+    /** Full-width bar (edit_form_top) for tagging this post's content species. */
+    public function veyra_species_render_editor_bar($post) {
+        if (!$post || !in_array($post->post_type, array('post', 'page'), true)) {
+            return;
+        }
+        $all_species = get_option('veyra_content_species', array());
+        if (!is_array($all_species)) { $all_species = array(); }
+        $species_value = isset($all_species[$post->ID]) ? $all_species[$post->ID] : '';
+
+        echo '<div class="veyra-sm-bar veyra-species-bar" id="veyra-species-bar">';
+        echo '<div class="veyra-sm-bar__header" id="veyra-species-bar-header">'
+            . '<span class="veyra-sm-bar__label">veyra content species info</span>'
+            . '<span class="veyra-sm-bar__toggle" id="veyra-species-toggle">[collapse]</span></div>';
+        echo '<div class="veyra-sm-bar__body" id="veyra-species-bar-body">';
+        wp_nonce_field('veyra_species_save', 'veyra_species_nonce');
+        echo '<div class="veyra-species-row">';
+        echo '<label class="veyra-species-label" for="veyra-species-input">wp_options: veyra_content_species</label>';
+        echo '<input type="text" id="veyra-species-input" class="veyra-sm-input veyra-species-input" name="veyra_content_species" value="' . esc_attr($species_value) . '" />';
+        echo '<div class="veyra-species-pills">';
+        echo '<button type="button" class="veyra-species-pill veyra-species-pill--clear" data-value="">(clear)</button>';
+        $pills = array('content_direct_from_wayback', 'new_content_in_style_of_wayback_topic', 'desirable_commercial_content');
+        foreach ($pills as $pill) {
+            echo '<button type="button" class="veyra-species-pill" data-value="' . esc_attr($pill) . '">'
+                . '<span class="veyra-species-pill__main">' . esc_html($pill) . '</span>'
+                . '<span class="veyra-species-pill__copy" data-copy-value="' . esc_attr($pill) . '" title="Copy value to clipboard">c</span>'
+                . '</button>';
+        }
+        echo '</div>';
+        echo '</div>';
+        echo '</div></div>';
+    }
+
+    /** Persist this post's content-species tag into the shared, post-ID-keyed wp_option. */
+    public function veyra_species_save_editor($post_id, $post) {
+        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) { return; }
+        if (wp_is_post_revision($post_id)) { return; }
+        if (!isset($_POST['veyra_species_nonce']) || !wp_verify_nonce($_POST['veyra_species_nonce'], 'veyra_species_save')) { return; }
+        if (!current_user_can('edit_post', $post_id)) { return; }
+        if (!isset($_POST['veyra_content_species'])) { return; }
+
+        $value = sanitize_text_field(wp_unslash($_POST['veyra_content_species']));
+        $all_species = get_option('veyra_content_species', array());
+        if (!is_array($all_species)) { $all_species = array(); }
+
+        if ($value === '') {
+            unset($all_species[$post_id]);
+        } else {
+            $all_species[$post_id] = $value;
+        }
+        update_option('veyra_content_species', $all_species);
+    }
+
     /** Inline styles for the editor bar (only on the post edit screens). */
     public function veyra_sm_editor_styles() {
         echo '<style>
@@ -1417,6 +1477,17 @@ class Veyra {
         .veyra-sm-linkrow .veyra-sm-input { flex:1; }
         .veyra-sm-actions { margin:0 0 12px 0; }
         .veyra-sm-status { margin-left:10px; font-style:italic; color:#646970; }
+        .veyra-species-row { display:flex; align-items:center; flex-wrap:wrap; gap:14px; }
+        .veyra-species-label { font-weight:700; font-size:14px; white-space:nowrap; }
+        .veyra-species-input { flex:1 1 260px; max-width:420px; }
+        .veyra-species-pills { display:flex; gap:8px; flex-wrap:wrap; }
+        .veyra-species-pill { display:inline-flex; align-items:stretch; border-radius:999px; padding:0; background:#f0f0f1; border:1px solid #c3c4c7; cursor:pointer; font-size:12px; line-height:1.4; overflow:hidden; }
+        .veyra-species-pill:hover { background:#dcdcde; }
+        .veyra-species-pill__main { display:flex; align-items:center; padding:5px 16px; }
+        .veyra-species-pill__copy { display:flex; align-items:center; justify-content:center; width:16px; flex:0 0 16px; border-left:1px solid #c3c4c7; font-weight:700; color:#646970; }
+        .veyra-species-pill__copy:hover { background:#c3c4c7; color:#1d2327; }
+        .veyra-species-pill--clear { padding:5px 16px; background:transparent; border-color:transparent; color:#a7aaad; font-style:italic; }
+        .veyra-species-pill--clear:hover { background:#f0f0f1; color:#646970; }
         </style>';
     }
 
@@ -1433,20 +1504,65 @@ class Veyra {
         <script>
         window.veyraSm = <?php echo wp_json_encode($cfg); ?>;
         (function(){
+            // Collapse/expand toggle — shared by every ".veyra-sm-bar" box (sm bar + species bar).
+            document.querySelectorAll('.veyra-sm-bar').forEach(function(barEl){
+                var headerEl = barEl.querySelector('.veyra-sm-bar__header');
+                var toggleEl = barEl.querySelector('.veyra-sm-bar__toggle');
+                if (!headerEl) { return; }
+                var key = barEl.id === 'veyra-sm-bar' ? 'veyra_sm_collapsed' : 'veyra_sm_collapsed_' + barEl.id;
+                function apply(c){
+                    if (c) { barEl.classList.add('collapsed'); if (toggleEl) toggleEl.textContent = '[expand]'; }
+                    else  { barEl.classList.remove('collapsed'); if (toggleEl) toggleEl.textContent = '[collapse]'; }
+                }
+                apply(localStorage.getItem(key) === '1');
+                headerEl.addEventListener('click', function(){
+                    var c = !barEl.classList.contains('collapsed');
+                    apply(c); localStorage.setItem(key, c ? '1' : '0');
+                });
+            });
+
+            // Content-species pills: clicking the main area fills the text input; clicking
+            // the right-edge "c" strip copies that pill's value to the clipboard instead.
+            function veyraSpeciesCopy(str) {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(str).catch(function(){ veyraSpeciesCopyFallback(str); });
+                } else {
+                    veyraSpeciesCopyFallback(str);
+                }
+            }
+            function veyraSpeciesCopyFallback(str) {
+                var ta = document.createElement('textarea');
+                ta.value = str;
+                ta.style.position = 'fixed'; ta.style.opacity = '0';
+                document.body.appendChild(ta); ta.focus(); ta.select();
+                try { document.execCommand('copy'); } catch (err) { /* no-op */ }
+                document.body.removeChild(ta);
+            }
+            var speciesBar = document.getElementById('veyra-species-bar');
+            if (speciesBar) {
+                speciesBar.addEventListener('click', function(e){
+                    var copyEl = e.target.closest ? e.target.closest('.veyra-species-pill__copy') : null;
+                    if (copyEl) {
+                        e.preventDefault(); e.stopPropagation();
+                        var copyVal = copyEl.getAttribute('data-copy-value') || '';
+                        if (!copyVal) { return; }
+                        veyraSpeciesCopy(copyVal);
+                        var orig = copyEl.textContent;
+                        copyEl.textContent = '✓';
+                        setTimeout(function(){ copyEl.textContent = orig; }, 1000);
+                        return;
+                    }
+                    var pillEl = e.target.closest ? e.target.closest('.veyra-species-pill') : null;
+                    if (pillEl) {
+                        e.preventDefault();
+                        var input = document.getElementById('veyra-species-input');
+                        if (input) { input.value = pillEl.getAttribute('data-value') || ''; }
+                    }
+                });
+            }
+
             var bar = document.getElementById('veyra-sm-bar');
             if (!bar) { return; }
-            var header = document.getElementById('veyra-sm-bar-header');
-            var toggle = document.getElementById('veyra-sm-toggle');
-            var KEY = 'veyra_sm_collapsed';
-            function apply(c){
-                if (c) { bar.classList.add('collapsed'); if (toggle) toggle.textContent = '[expand]'; }
-                else  { bar.classList.remove('collapsed'); if (toggle) toggle.textContent = '[collapse]'; }
-            }
-            apply(localStorage.getItem(KEY) === '1');
-            header.addEventListener('click', function(){
-                var c = !bar.classList.contains('collapsed');
-                apply(c); localStorage.setItem(KEY, c ? '1' : '0');
-            });
             bar.addEventListener('click', function(e){
                 var t = e.target;
                 if (!t.classList) { return; }
