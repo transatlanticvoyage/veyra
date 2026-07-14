@@ -1414,6 +1414,10 @@ class Veyra {
         if (!is_array($all_species)) { $all_species = array(); }
         $species_value = isset($all_species[$post->ID]) ? $all_species[$post->ID] : '';
 
+        $all_subspecies = get_option('veyra_content_subspecies', array());
+        if (!is_array($all_subspecies)) { $all_subspecies = array(); }
+        $subspecies_value = isset($all_subspecies[$post->ID]) ? $all_subspecies[$post->ID] : '';
+
         echo '<div class="veyra-sm-bar veyra-species-bar" id="veyra-species-bar">';
         echo '<div class="veyra-sm-bar__header" id="veyra-species-bar-header">'
             . '<span class="veyra-sm-bar__label">veyra content species info</span>'
@@ -1434,27 +1438,67 @@ class Veyra {
         }
         echo '</div>';
         echo '</div>';
+
+        echo '<div class="veyra-species-row veyra-subspecies-row">';
+        echo '<label class="veyra-species-label" for="veyra-subspecies-input">wp_options: veyra_content_subspecies</label>';
+        echo '<input type="text" id="veyra-subspecies-input" class="veyra-sm-input veyra-species-input" name="veyra_content_subspecies" value="' . esc_attr($subspecies_value) . '" />';
+        echo '<div class="veyra-species-pills">';
+        echo '<button type="button" class="veyra-species-pill veyra-species-pill--clear" data-value="">(clear)</button>';
+        $subspecies_pills = array(
+            'actual_copied_historical_content - direct from wayback',
+            'new_freshly_invented_content - placed on page direct from wayback',
+        );
+        foreach ($subspecies_pills as $raw_pill) {
+            $parts = array_map('trim', explode(' - ', $raw_pill, 2));
+            $pill_value = $parts[0];
+            $pill_desc  = isset($parts[1]) ? $parts[1] : '';
+            echo '<div class="veyra-species-pill-wrap">';
+            echo '<button type="button" class="veyra-species-pill" data-value="' . esc_attr($pill_value) . '">'
+                . '<span class="veyra-species-pill__main">' . esc_html($pill_value) . '</span>'
+                . '<span class="veyra-species-pill__copy" data-copy-value="' . esc_attr($pill_value) . '" title="Copy value to clipboard">c</span>'
+                . '</button>';
+            if ($pill_desc !== '') {
+                echo '<div class="veyra-species-pill-desc">' . esc_html($pill_desc) . '</div>';
+            }
+            echo '</div>';
+        }
+        echo '</div>';
+        echo '<span class="veyra-species-note">NOTE: only use subspecies value when species is "content_direct_from_wayback"</span>';
+        echo '</div>';
+
         echo '</div></div>';
     }
 
-    /** Persist this post's content-species tag into the shared, post-ID-keyed wp_option. */
+    /** Persist this post's content-species/subspecies tags into their shared, post-ID-keyed wp_options. */
     public function veyra_species_save_editor($post_id, $post) {
         if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) { return; }
         if (wp_is_post_revision($post_id)) { return; }
         if (!isset($_POST['veyra_species_nonce']) || !wp_verify_nonce($_POST['veyra_species_nonce'], 'veyra_species_save')) { return; }
         if (!current_user_can('edit_post', $post_id)) { return; }
-        if (!isset($_POST['veyra_content_species'])) { return; }
 
-        $value = sanitize_text_field(wp_unslash($_POST['veyra_content_species']));
-        $all_species = get_option('veyra_content_species', array());
-        if (!is_array($all_species)) { $all_species = array(); }
-
-        if ($value === '') {
-            unset($all_species[$post_id]);
-        } else {
-            $all_species[$post_id] = $value;
+        if (isset($_POST['veyra_content_species'])) {
+            $value = sanitize_text_field(wp_unslash($_POST['veyra_content_species']));
+            $all_species = get_option('veyra_content_species', array());
+            if (!is_array($all_species)) { $all_species = array(); }
+            if ($value === '') {
+                unset($all_species[$post_id]);
+            } else {
+                $all_species[$post_id] = $value;
+            }
+            update_option('veyra_content_species', $all_species);
         }
-        update_option('veyra_content_species', $all_species);
+
+        if (isset($_POST['veyra_content_subspecies'])) {
+            $sub_value = sanitize_text_field(wp_unslash($_POST['veyra_content_subspecies']));
+            $all_subspecies = get_option('veyra_content_subspecies', array());
+            if (!is_array($all_subspecies)) { $all_subspecies = array(); }
+            if ($sub_value === '') {
+                unset($all_subspecies[$post_id]);
+            } else {
+                $all_subspecies[$post_id] = $sub_value;
+            }
+            update_option('veyra_content_subspecies', $all_subspecies);
+        }
     }
 
     /** Inline styles for the editor bar (only on the post edit screens). */
@@ -1488,6 +1532,10 @@ class Veyra {
         .veyra-species-pill__copy:hover { background:#c3c4c7; color:#1d2327; }
         .veyra-species-pill--clear { padding:5px 16px; background:transparent; border-color:transparent; color:#a7aaad; font-style:italic; }
         .veyra-species-pill--clear:hover { background:#f0f0f1; color:#646970; }
+        .veyra-subspecies-row { margin-top:14px; padding-top:14px; border-top:1px dashed #e0e0e0; }
+        .veyra-species-pill-wrap { display:flex; flex-direction:column; align-items:flex-start; gap:4px; }
+        .veyra-species-pill-desc { font-size:11px; color:#646970; font-style:italic; max-width:240px; line-height:1.3; }
+        .veyra-species-note { font-size:12px; color:#b32d2e; font-style:italic; }
         </style>';
     }
 
@@ -1555,7 +1603,8 @@ class Veyra {
                     var pillEl = e.target.closest ? e.target.closest('.veyra-species-pill') : null;
                     if (pillEl) {
                         e.preventDefault();
-                        var input = document.getElementById('veyra-species-input');
+                        var rowEl = pillEl.closest('.veyra-species-row');
+                        var input = rowEl ? rowEl.querySelector('input.veyra-species-input') : document.getElementById('veyra-species-input');
                         if (input) { input.value = pillEl.getAttribute('data-value') || ''; }
                     }
                 });
