@@ -283,7 +283,7 @@ function veyra_pcdm_render_page() {
         "SELECT ID, post_status, post_type, post_title, post_content
          FROM {$wpdb->posts}
          WHERE post_type IN ('post','page')
-         AND post_status NOT IN ('auto-draft')
+         AND post_status IN ('publish','future')
          ORDER BY ID DESC"
     );
 
@@ -402,7 +402,7 @@ function veyra_pcdm_render_page() {
                     <td><?php echo $id; ?></td>
                     <td><?php echo esc_html($p->post_status); ?></td>
                     <td><?php echo esc_html($p->post_type); ?></td>
-                    <td><?php echo esc_html($p->post_title); ?></td>
+                    <td class="veyra-pcdm-col-title" title="<?php echo esc_attr($p->post_title); ?>"><?php echo esc_html($p->post_title); ?></td>
                     <td><?php echo esc_html(veyra_pcdm_truncate($p->post_content)); ?></td>
                     <td class="veyra-pcdm-col-tools">
                         <a class="button button-small" href="<?php echo esc_url(get_edit_post_link($id, 'raw')); ?>" target="_blank" rel="noopener">edit</a>
@@ -570,6 +570,12 @@ function veyra_pcdm_render_page() {
         }
         .veyra-pcdm-table .veyra-pcdm-col-subspecies {
             border-right: 2px solid #000 !important;
+        }
+        .veyra-pcdm-col-title {
+            max-width: 470px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .veyra-pcdm-col-tools .button {
             margin-right: 4px;
