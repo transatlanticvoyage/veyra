@@ -1513,50 +1513,78 @@ class Veyra {
         }
     }
 
-    /** Paste box (edit_form_after_editor) for caching a page's original wayback content. */
+    /** Option names backing the snap-height paste boxes rendered below the post_content editor. */
+    private function veyra_snap_height_option_names() {
+        return array(
+            'veyra_cached_original_wayback_content',
+            'veyra_freshly_invented_content_before_deployment_to_live_post_content',
+        );
+    }
+
+    /** Paste boxes (edit_form_after_editor) below the native content editor: caching a
+     *  page's original wayback content, and staging freshly-invented content before it's
+     *  deployed into the live post_content. Each is backed by its own wp_option keyed by
+     *  post ID, so each page/post owns exactly one entry per option. */
     public function veyra_wayback_render_editor_box($post) {
         if (!$post || !in_array($post->post_type, array('post', 'page'), true)) {
             return;
         }
-        $all_wayback = get_option('veyra_cached_original_wayback_content', array());
-        if (!is_array($all_wayback)) { $all_wayback = array(); }
-        $wayback_value = isset($all_wayback[$post->ID]) ? $all_wayback[$post->ID] : '';
-
-        echo '<div class="veyra-wayback-box" id="veyra-wayback-box">';
         wp_nonce_field('veyra_wayback_save', 'veyra_wayback_nonce');
-        echo '<p class="veyra-wayback-label">wp_options: veyra_cached_original_wayback_content</p>';
-        echo '<div class="veyra-wayback-heightbar" id="veyra-wayback-heightbar">';
+        foreach ($this->veyra_snap_height_option_names() as $option_name) {
+            $this->veyra_render_snap_height_box($post->ID, $option_name);
+        }
+    }
+
+    /** Renders one snap-height labeled textarea box for a given post-ID-keyed wp_option. */
+    private function veyra_render_snap_height_box($post_id, $option_name) {
+        $all = get_option($option_name, array());
+        if (!is_array($all)) { $all = array(); }
+        $value = isset($all[$post_id]) ? $all[$post_id] : '';
+        $textarea_id  = 'veyra-snap-' . str_replace('_', '-', $option_name);
+        $heightbar_id = $textarea_id . '-heightbar';
+
+        echo '<div class="veyra-wayback-box" id="' . esc_attr($textarea_id) . '-box">';
+        echo '<p class="veyra-wayback-label">wp_options: ' . esc_html($option_name) . '</p>';
+        echo '<div class="veyra-wayback-heightbar" id="' . esc_attr($heightbar_id) . '">';
         echo '<button type="button" class="button veyra-wayback-height-btn veyra-wayback-height-btn--active" data-h="100">height: 100 px</button>';
         echo '<span class="veyra-wayback-sep">|</span>';
         echo '<button type="button" class="button veyra-wayback-height-btn" data-h="300">300 px</button>';
         echo '<span class="veyra-wayback-sep">|</span>';
         echo '<button type="button" class="button veyra-wayback-height-btn" data-h="full">100% of contents</button>';
         echo '</div>';
-        echo '<textarea id="veyra-wayback-textarea" class="veyra-wayback-textarea" name="veyra_cached_original_wayback_content">' . esc_textarea($wayback_value) . '</textarea>';
+        echo '<textarea id="' . esc_attr($textarea_id) . '" class="veyra-wayback-textarea" name="' . esc_attr($option_name) . '">' . esc_textarea($value) . '</textarea>';
         echo '</div>';
     }
 
-    /** Persist this post's cached-wayback-content paste into the shared, post-ID-keyed wp_option. */
+    /** Persist each snap-height box's paste into its own shared, post-ID-keyed wp_option. */
     public function veyra_wayback_save_editor($post_id, $post) {
         if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) { return; }
         if (wp_is_post_revision($post_id)) { return; }
         if (!isset($_POST['veyra_wayback_nonce']) || !wp_verify_nonce($_POST['veyra_wayback_nonce'], 'veyra_wayback_save')) { return; }
         if (!current_user_can('edit_post', $post_id)) { return; }
-        if (!isset($_POST['veyra_cached_original_wayback_content'])) { return; }
 
-        $value = wp_unslash($_POST['veyra_cached_original_wayback_content']);
-        $all_wayback = get_option('veyra_cached_original_wayback_content', array());
-        if (!is_array($all_wayback)) { $all_wayback = array(); }
+        foreach ($this->veyra_snap_height_option_names() as $option_name) {
+            $this->veyra_save_snap_height_field($post_id, $option_name);
+        }
+    }
+
+    /** Upserts (or clears) this post's entry in one snap-height option's post-ID-keyed array. */
+    private function veyra_save_snap_height_field($post_id, $option_name) {
+        if (!isset($_POST[$option_name])) { return; }
+
+        $value = wp_unslash($_POST[$option_name]);
+        $all = get_option($option_name, array());
+        if (!is_array($all)) { $all = array(); }
 
         if (trim($value) === '') {
-            unset($all_wayback[$post_id]);
+            unset($all[$post_id]);
         } else {
-            $all_wayback[$post_id] = $value;
+            $all[$post_id] = $value;
         }
-        // autoload=false: this option can grow large (raw pasted page content per post)
-        // and is only ever read on the single post's edit screen, so it should never
+        // autoload=false: these options can grow large (raw pasted page content per post)
+        // and are only ever read on the single post's edit screen, so they should never
         // be loaded on every front-end/admin request.
-        update_option('veyra_cached_original_wayback_content', $all_wayback, false);
+        update_option($option_name, $all, false);
     }
 
     /** Inline styles for the editor bar (only on the post edit screens). */
@@ -1693,26 +1721,30 @@ class Veyra {
             if (veyraSubspeciesInputEl) { veyraSubspeciesInputEl.addEventListener('input', veyraUpdateSubspeciesVisibility); }
             veyraUpdateSubspeciesVisibility();
 
-            // Cached-wayback-content box: button bar snaps the textarea's height.
-            var waybackTextarea = document.getElementById('veyra-wayback-textarea');
-            var waybackHeightbar = document.getElementById('veyra-wayback-heightbar');
-            if (waybackTextarea && waybackHeightbar) {
-                waybackHeightbar.addEventListener('click', function(e){
+            // Snap-height paste boxes (cached wayback content, freshly-invented content, ...):
+            // each ".veyra-wayback-heightbar" button bar snaps the height of its own
+            // sibling textarea within the same ".veyra-wayback-box" container. Handles
+            // any number of these boxes on the screen, not just a single hardcoded pair.
+            document.querySelectorAll('.veyra-wayback-heightbar').forEach(function(heightbar){
+                var box = heightbar.closest('.veyra-wayback-box');
+                var textarea = box ? box.querySelector('.veyra-wayback-textarea') : null;
+                if (!textarea) { return; }
+                heightbar.addEventListener('click', function(e){
                     var btn = e.target.closest ? e.target.closest('.veyra-wayback-height-btn') : null;
                     if (!btn) { return; }
                     e.preventDefault();
                     var h = btn.getAttribute('data-h');
                     if (h === 'full') {
-                        waybackTextarea.style.height = 'auto';
-                        waybackTextarea.style.height = waybackTextarea.scrollHeight + 'px';
+                        textarea.style.height = 'auto';
+                        textarea.style.height = textarea.scrollHeight + 'px';
                     } else {
-                        waybackTextarea.style.height = h + 'px';
+                        textarea.style.height = h + 'px';
                     }
-                    waybackHeightbar.querySelectorAll('.veyra-wayback-height-btn').forEach(function(b){
+                    heightbar.querySelectorAll('.veyra-wayback-height-btn').forEach(function(b){
                         b.classList.toggle('veyra-wayback-height-btn--active', b === btn);
                     });
                 });
-            }
+            });
 
             var bar = document.getElementById('veyra-sm-bar');
             if (!bar) { return; }
