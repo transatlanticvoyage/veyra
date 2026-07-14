@@ -102,6 +102,13 @@ class Veyra {
         add_action('edit_form_top', array($this, 'veyra_species_render_editor_bar'));
         add_action('save_post', array($this, 'veyra_species_save_editor'), 10, 2);
 
+        // Cached-original-wayback-content paste box: rendered just below the native
+        // post_content editor. Backed by a single wp_option
+        // ('veyra_cached_original_wayback_content') keyed by post ID, so each
+        // page/post owns exactly one entry in that option.
+        add_action('edit_form_after_editor', array($this, 'veyra_wayback_render_editor_box'));
+        add_action('save_post', array($this, 'veyra_wayback_save_editor'), 10, 2);
+
         add_action('admin_print_styles-post.php', array($this, 'veyra_sm_editor_styles'));
         add_action('admin_print_styles-post-new.php', array($this, 'veyra_sm_editor_styles'));
         add_action('admin_print_footer_scripts', array($this, 'veyra_sm_editor_js'));
@@ -1439,7 +1446,12 @@ class Veyra {
         echo '</div>';
         echo '</div>';
 
-        echo '<div class="veyra-species-row veyra-subspecies-row">';
+        // Shown when the species value is exactly "content_direct_from_wayback" OR a
+        // subspecies value is already saved (so existing tags stay visible even if
+        // species is later changed away) — kept in sync live by JS as either field
+        // changes (typed or set via pill click).
+        $subspecies_visible = ($species_value === 'content_direct_from_wayback' || $subspecies_value !== '');
+        echo '<div class="veyra-species-row veyra-subspecies-row" id="veyra-subspecies-row"' . ($subspecies_visible ? '' : ' style="display:none;"') . '>';
         echo '<label class="veyra-species-label" for="veyra-subspecies-input">wp_options: veyra_content_subspecies</label>';
         echo '<input type="text" id="veyra-subspecies-input" class="veyra-sm-input veyra-species-input" name="veyra_content_subspecies" value="' . esc_attr($subspecies_value) . '" />';
         echo '<div class="veyra-species-pills">';
@@ -1501,6 +1513,52 @@ class Veyra {
         }
     }
 
+    /** Paste box (edit_form_after_editor) for caching a page's original wayback content. */
+    public function veyra_wayback_render_editor_box($post) {
+        if (!$post || !in_array($post->post_type, array('post', 'page'), true)) {
+            return;
+        }
+        $all_wayback = get_option('veyra_cached_original_wayback_content', array());
+        if (!is_array($all_wayback)) { $all_wayback = array(); }
+        $wayback_value = isset($all_wayback[$post->ID]) ? $all_wayback[$post->ID] : '';
+
+        echo '<div class="veyra-wayback-box" id="veyra-wayback-box">';
+        wp_nonce_field('veyra_wayback_save', 'veyra_wayback_nonce');
+        echo '<p class="veyra-wayback-label">wp_options: veyra_cached_original_wayback_content</p>';
+        echo '<div class="veyra-wayback-heightbar" id="veyra-wayback-heightbar">';
+        echo '<button type="button" class="button veyra-wayback-height-btn veyra-wayback-height-btn--active" data-h="100">height: 100 px</button>';
+        echo '<span class="veyra-wayback-sep">|</span>';
+        echo '<button type="button" class="button veyra-wayback-height-btn" data-h="300">300 px</button>';
+        echo '<span class="veyra-wayback-sep">|</span>';
+        echo '<button type="button" class="button veyra-wayback-height-btn" data-h="full">100% of contents</button>';
+        echo '</div>';
+        echo '<textarea id="veyra-wayback-textarea" class="veyra-wayback-textarea" name="veyra_cached_original_wayback_content">' . esc_textarea($wayback_value) . '</textarea>';
+        echo '</div>';
+    }
+
+    /** Persist this post's cached-wayback-content paste into the shared, post-ID-keyed wp_option. */
+    public function veyra_wayback_save_editor($post_id, $post) {
+        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) { return; }
+        if (wp_is_post_revision($post_id)) { return; }
+        if (!isset($_POST['veyra_wayback_nonce']) || !wp_verify_nonce($_POST['veyra_wayback_nonce'], 'veyra_wayback_save')) { return; }
+        if (!current_user_can('edit_post', $post_id)) { return; }
+        if (!isset($_POST['veyra_cached_original_wayback_content'])) { return; }
+
+        $value = wp_unslash($_POST['veyra_cached_original_wayback_content']);
+        $all_wayback = get_option('veyra_cached_original_wayback_content', array());
+        if (!is_array($all_wayback)) { $all_wayback = array(); }
+
+        if (trim($value) === '') {
+            unset($all_wayback[$post_id]);
+        } else {
+            $all_wayback[$post_id] = $value;
+        }
+        // autoload=false: this option can grow large (raw pasted page content per post)
+        // and is only ever read on the single post's edit screen, so it should never
+        // be loaded on every front-end/admin request.
+        update_option('veyra_cached_original_wayback_content', $all_wayback, false);
+    }
+
     /** Inline styles for the editor bar (only on the post edit screens). */
     public function veyra_sm_editor_styles() {
         echo '<style>
@@ -1536,6 +1594,12 @@ class Veyra {
         .veyra-species-pill-wrap { display:flex; flex-direction:column; align-items:flex-start; gap:4px; }
         .veyra-species-pill-desc { font-size:11px; color:#646970; font-style:italic; max-width:240px; line-height:1.3; }
         .veyra-species-note { font-size:12px; color:#b32d2e; font-style:italic; }
+        .veyra-wayback-box { border:1px solid #c3c4c7; background:#fff; margin:20px 0 0 0; padding:14px; }
+        .veyra-wayback-label { font-weight:700; font-size:14px; margin:0 0 10px; }
+        .veyra-wayback-heightbar { margin:0 0 8px; display:flex; align-items:center; gap:8px; }
+        .veyra-wayback-sep { color:#c3c4c7; }
+        .veyra-wayback-height-btn--active { background:#2271b1; color:#fff; border-color:#2271b1; }
+        .veyra-wayback-textarea { width:100%; box-sizing:border-box; font-family:monospace; font-size:12px; height:100px; overflow-y:auto; resize:none; display:block; }
         </style>';
     }
 
@@ -1586,6 +1650,18 @@ class Veyra {
                 try { document.execCommand('copy'); } catch (err) { /* no-op */ }
                 document.body.removeChild(ta);
             }
+            // Subspecies strip shows when species is exactly "content_direct_from_wayback"
+            // OR a subspecies value is already present — recomputed on every change to
+            // either field, whether typed or set via a pill click.
+            function veyraUpdateSubspeciesVisibility() {
+                var speciesInput    = document.getElementById('veyra-species-input');
+                var subspeciesInput = document.getElementById('veyra-subspecies-input');
+                var row             = document.getElementById('veyra-subspecies-row');
+                if (!speciesInput || !subspeciesInput || !row) { return; }
+                var show = (speciesInput.value.trim() === 'content_direct_from_wayback') || (subspeciesInput.value.trim() !== '');
+                row.style.display = show ? '' : 'none';
+            }
+
             var speciesBar = document.getElementById('veyra-species-bar');
             if (speciesBar) {
                 speciesBar.addEventListener('click', function(e){
@@ -1606,7 +1682,35 @@ class Veyra {
                         var rowEl = pillEl.closest('.veyra-species-row');
                         var input = rowEl ? rowEl.querySelector('input.veyra-species-input') : document.getElementById('veyra-species-input');
                         if (input) { input.value = pillEl.getAttribute('data-value') || ''; }
+                        veyraUpdateSubspeciesVisibility();
                     }
+                });
+            }
+
+            var veyraSpeciesInputEl    = document.getElementById('veyra-species-input');
+            var veyraSubspeciesInputEl = document.getElementById('veyra-subspecies-input');
+            if (veyraSpeciesInputEl)    { veyraSpeciesInputEl.addEventListener('input', veyraUpdateSubspeciesVisibility); }
+            if (veyraSubspeciesInputEl) { veyraSubspeciesInputEl.addEventListener('input', veyraUpdateSubspeciesVisibility); }
+            veyraUpdateSubspeciesVisibility();
+
+            // Cached-wayback-content box: button bar snaps the textarea's height.
+            var waybackTextarea = document.getElementById('veyra-wayback-textarea');
+            var waybackHeightbar = document.getElementById('veyra-wayback-heightbar');
+            if (waybackTextarea && waybackHeightbar) {
+                waybackHeightbar.addEventListener('click', function(e){
+                    var btn = e.target.closest ? e.target.closest('.veyra-wayback-height-btn') : null;
+                    if (!btn) { return; }
+                    e.preventDefault();
+                    var h = btn.getAttribute('data-h');
+                    if (h === 'full') {
+                        waybackTextarea.style.height = 'auto';
+                        waybackTextarea.style.height = waybackTextarea.scrollHeight + 'px';
+                    } else {
+                        waybackTextarea.style.height = h + 'px';
+                    }
+                    waybackHeightbar.querySelectorAll('.veyra-wayback-height-btn').forEach(function(b){
+                        b.classList.toggle('veyra-wayback-height-btn--active', b === btn);
+                    });
                 });
             }
 
