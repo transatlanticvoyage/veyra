@@ -273,6 +273,80 @@ function veyra_pcdm_ajax_switchover_now() {
     wp_send_json_success($result);
 }
 
+/**
+ * Undo a switchover for a specific set of post IDs: copy
+ * veyra_cached_original_wayback_content back into post_content (overriding
+ * whatever is currently there), and set veyra_content_subspecies back to
+ * actual_copied_historical_content.
+ */
+function veyra_pcdm_revert_switchover($post_ids) {
+    $result = array('reverted' => 0, 'skipped' => 0);
+    if (!is_array($post_ids) || !$post_ids) {
+        return $result;
+    }
+
+    $cached_original = get_option('veyra_cached_original_wayback_content', array());
+    if (!is_array($cached_original)) {
+        $cached_original = array();
+    }
+    $subspecies = get_option('veyra_content_subspecies', array());
+    if (!is_array($subspecies)) {
+        $subspecies = array();
+    }
+
+    $subspecies_changed = false;
+
+    foreach ($post_ids as $post_id) {
+        $post_id = intval($post_id);
+        if ($post_id <= 0) {
+            continue;
+        }
+        // Nothing cached to revert to.
+        if (!isset($cached_original[$post_id]) || trim((string) $cached_original[$post_id]) === '') {
+            $result['skipped']++;
+            continue;
+        }
+
+        wp_update_post(array(
+            'ID'           => $post_id,
+            'post_content' => $cached_original[$post_id],
+        ));
+
+        $subspecies[$post_id] = 'actual_copied_historical_content';
+        $subspecies_changed    = true;
+
+        $result['reverted']++;
+    }
+
+    if ($subspecies_changed) {
+        update_option('veyra_content_subspecies', $subspecies, false);
+    }
+
+    return $result;
+}
+
+// ---------------------------------------------------------------------------
+// AJAX: "revert switchover" — undoes a switchover for the selected items by
+// copying veyra_cached_original_wayback_content back into post_content and
+// resetting veyra_content_subspecies to actual_copied_historical_content.
+// ---------------------------------------------------------------------------
+add_action('wp_ajax_veyra_pcdm_revert_switchover', 'veyra_pcdm_ajax_revert_switchover');
+function veyra_pcdm_ajax_revert_switchover() {
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error('unauthorized', 403);
+    }
+    check_ajax_referer('veyra_pcdm_revert_switchover', 'nonce');
+
+    $raw = isset($_POST['ids']) ? wp_unslash($_POST['ids']) : '';
+    $ids = json_decode($raw, true);
+    if (!is_array($ids) || !$ids) {
+        wp_send_json_error('no ids provided', 400);
+    }
+
+    $result = veyra_pcdm_revert_switchover($ids);
+    wp_send_json_success($result);
+}
+
 function veyra_pcdm_render_page() {
     if (!current_user_can('manage_options')) {
         wp_die('Unauthorized');
@@ -335,6 +409,8 @@ function veyra_pcdm_render_page() {
                 <button type="button" class="button" id="veyra-pcdm-select-past-due">select items with switchover date in past</button>
                 <button type="button" class="button button-primary" id="veyra-pcdm-switchover-now"
                     data-nonce="<?php echo esc_attr(wp_create_nonce('veyra_pcdm_switchover_now')); ?>">perform content switchover now</button>
+                <button type="button" class="veyra-pcdm-revert-btn" id="veyra-pcdm-revert-switchover"
+                    data-nonce="<?php echo esc_attr(wp_create_nonce('veyra_pcdm_revert_switchover')); ?>">revert switchover</button>
             </div>
         </div>
 
@@ -482,6 +558,22 @@ function veyra_pcdm_render_page() {
             border: 1px solid gray;
             border-radius: 4px;
             margin-top: 6px;
+        }
+        .veyra-pcdm-revert-btn {
+            background: maroon;
+            color: #fff;
+            border: 1px solid maroon;
+            border-radius: 3px;
+            padding: 0 10px;
+            line-height: 2.15384615;
+            min-height: 30px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .veyra-pcdm-revert-btn:hover {
+            background: #6b0000;
+            border-color: #6b0000;
+            color: #fff;
         }
         .veyra-pcdm-modal-overlay {
             display: none;
@@ -899,6 +991,47 @@ function veyra_pcdm_render_page() {
                         alert('Failed to perform switchover.');
                         switchoverNowBtn.disabled = false;
                         switchoverNowBtn.textContent = origText;
+                    });
+            });
+        }
+
+        // "revert switchover" — for the selected items, copies
+        // veyra_cached_original_wayback_content back into post_content and
+        // resets veyra_content_subspecies to actual_copied_historical_content.
+        var revertBtn = document.getElementById('veyra-pcdm-revert-switchover');
+        if (revertBtn) {
+            revertBtn.addEventListener('click', function(){
+                var selected = Array.prototype.slice.call(rowCbs()).filter(function(c){ return c.checked; });
+                if (selected.length === 0) {
+                    alert('No items selected. Tick the checkboxes for the items you want to revert.');
+                    return;
+                }
+                var ids = selected.map(function(c){ return c.value; });
+
+                revertBtn.disabled = true;
+                var origText = revertBtn.textContent;
+                revertBtn.textContent = 'reverting...';
+
+                var body = new URLSearchParams();
+                body.set('action', 'veyra_pcdm_revert_switchover');
+                body.set('nonce', revertBtn.getAttribute('data-nonce') || '');
+                body.set('ids', JSON.stringify(ids));
+
+                fetch(ajaxurl, { method: 'POST', credentials: 'same-origin', body: body })
+                    .then(function(r){ return r.json(); })
+                    .then(function(resp){
+                        if (resp && resp.success) {
+                            location.reload();
+                        } else {
+                            alert('Failed to revert switchover.');
+                            revertBtn.disabled = false;
+                            revertBtn.textContent = origText;
+                        }
+                    })
+                    .catch(function(){
+                        alert('Failed to revert switchover.');
+                        revertBtn.disabled = false;
+                        revertBtn.textContent = origText;
                     });
             });
         }
