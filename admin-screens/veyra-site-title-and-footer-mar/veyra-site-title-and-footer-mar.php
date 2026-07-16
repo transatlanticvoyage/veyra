@@ -138,6 +138,7 @@ function veyra_stfm_process_due_drips() {
     if ($enabled === '1' && is_numeric($date) && intval($date) > 0 && intval($date) <= $now && $done !== 'DONE') {
         $content = get_option('veyra_footer_text_corepoint_drip_to_content', '');
         update_option('veyra_footer_text_corepoint', $content);
+        update_option('veyra_footer_text_corepoint_enabled_for_theme_logic', '1');
         update_option('veyra_footer_text_corepoint_drip_completed', 'DONE');
     }
 }
