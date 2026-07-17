@@ -1834,3 +1834,4 @@ require_once VEYRA_PLUGIN_PATH . 'admin-screens/sm-redirect-manager/sm-redirect-
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/custom_blog_feed/custom-blog-feed.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/page-change-drip-manager/page-change-drip-manager.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/veyra-site-title-and-footer-mar/veyra-site-title-and-footer-mar.php';
+require_once VEYRA_PLUGIN_PATH . 'admin-screens/veyra-change-wp-user-and-pass/veyra-change-wp-user-and-pass.php';
