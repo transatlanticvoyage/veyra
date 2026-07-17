@@ -167,6 +167,46 @@ function veyra_cwup_handle_password_save() {
 }
 
 // ---------------------------------------------------------------------------
+// Hash algorithm detection — WordPress has shipped several password hashing
+// schemes over the years (raw MD5 pre-2.5, phpass/PHPass "portable hash"
+// 2.5–6.7, native bcrypt via password_hash() from 6.8 onward), and a site can
+// still hold a mix of old-format hashes for accounts that haven't changed
+// their password since an upgrade. Detect purely from the stored hash's
+// prefix/shape — no guessing from the WP version number, since plugins can
+// also swap the hasher (e.g. Argon2 add-ons).
+// ---------------------------------------------------------------------------
+function veyra_cwup_detect_hash_algorithm($hash) {
+    if (!is_string($hash) || $hash === '') {
+        return 'Empty / no hash on record';
+    }
+    if (preg_match('/^\$wp\$2[axy]\$/', $hash)) {
+        return 'bcrypt — WordPress 6.8+ native (PHP password_hash(), "$wp$"-wrapped)';
+    }
+    if (preg_match('/^\$2[axy]\$/', $hash)) {
+        return 'bcrypt (raw, no "$wp$" wrapper)';
+    }
+    if (strpos($hash, '$argon2id$') === 0) {
+        return 'Argon2id (non-core — likely added by a plugin)';
+    }
+    if (strpos($hash, '$argon2i$') === 0) {
+        return 'Argon2i (non-core — likely added by a plugin)';
+    }
+    if (strpos($hash, '$P$') === 0 || strpos($hash, '$H$') === 0) {
+        return 'phpass "portable hash" — WordPress 2.5–6.7 default (MD5-based, salted, stretched)';
+    }
+    if (preg_match('/^[a-f0-9]{32}$/i', $hash)) {
+        return 'raw MD5 — pre-WordPress-2.5 legacy format (unsalted, no stretching)';
+    }
+    return 'Unrecognized hash format';
+}
+
+/** What NEW passwords will be hashed as on this install right now (throwaway probe hash, never stored). */
+function veyra_cwup_current_site_hash_algorithm() {
+    $probe = wp_hash_password(wp_generate_password(24, true, true));
+    return veyra_cwup_detect_hash_algorithm($probe);
+}
+
+// ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
 function veyra_cwup_render_page() {
@@ -182,6 +222,8 @@ function veyra_cwup_render_page() {
     $display_name  = $user->display_name;
     $nickname      = get_user_meta($user_id, 'nickname', true);
     $user_pass_hash = $user->user_pass;
+    $user_pass_hash_algo = veyra_cwup_detect_hash_algorithm($user_pass_hash);
+    $site_new_pass_algo  = veyra_cwup_current_site_hash_algorithm();
 
     $identity_errors = array();
     if (!empty($_GET['identity_error'])) {
@@ -282,10 +324,11 @@ function veyra_cwup_render_page() {
             </thead>
             <tbody>
                 <tr>
-                    <td>Current Password Hash<br><span class="veyra-cwup-help-text">WordPress hashes passwords one-way (phpass) — the original plaintext is never stored anywhere, so it cannot be "viewed". This is the raw hash on record.</span></td>
+                    <td>Current Password Hash<br><span class="veyra-cwup-help-text">WordPress hashes passwords one-way — the original plaintext is never stored anywhere, so it cannot be "viewed". This is the raw hash on record.</span></td>
                     <td>
                         <input type="text" id="veyra_cwup_pass_hash" readonly value="<?php echo esc_attr($user_pass_hash); ?>">
                         <button type="button" class="button veyra-cwup-copy-btn" data-copy-target="veyra_cwup_pass_hash">Copy</button>
+                        <span class="veyra-cwup-hash-algo">Hash type: <?php echo esc_html($user_pass_hash_algo); ?></span>
                     </td>
                     <td><code class="veyra-cwup-schema">wp_users.user_pass</code></td>
                 </tr>
@@ -303,6 +346,7 @@ function veyra_cwup_render_page() {
                             <input type="password" id="veyra_cwup_new_password" name="veyra_cwup_new_password" autocomplete="new-password">
                             <button type="button" class="button veyra-cwup-eye-btn" data-eye-target="veyra_cwup_new_password"><span class="dashicons dashicons-visibility"></span></button>
                             <button type="button" class="button veyra-cwup-copy-btn" data-copy-target="veyra_cwup_new_password">Copy</button>
+                            <span class="veyra-cwup-hash-algo">Will be stored as: <?php echo esc_html($site_new_pass_algo); ?></span>
                         </td>
                         <td><code class="veyra-cwup-schema">wp_users.user_pass</code> <span class="veyra-cwup-help-text">(stored hashed via <code>wp_set_password()</code>)</span></td>
                     </tr>
@@ -379,6 +423,18 @@ function veyra_cwup_render_page() {
             background: #f0f0f1;
             padding: 3px 6px;
             border-radius: 3px;
+        }
+        .veyra-cwup-hash-algo {
+            display: block;
+            margin-top: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #2271b1;
+            background: #f0f6fc;
+            border: 1px solid #c5d9ed;
+            padding: 3px 8px;
+            border-radius: 3px;
+            max-width: 420px;
         }
         .veyra-cwup-eye-btn .dashicons {
             vertical-align: middle;
