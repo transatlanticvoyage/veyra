@@ -174,6 +174,10 @@ function veyra_pcdm_deploy_switchover($post_ids) {
     if (!is_array($freshly_invented)) {
         $freshly_invented = array();
     }
+    $freshly_post_title = get_option('veyra_freshly_post_title', array());
+    if (!is_array($freshly_post_title)) {
+        $freshly_post_title = array();
+    }
     $subspecies = get_option('veyra_content_subspecies', array());
     if (!is_array($subspecies)) {
         $subspecies = array();
@@ -199,10 +203,16 @@ function veyra_pcdm_deploy_switchover($post_ids) {
         }
 
         // Copy the staged content into post_content, replacing whatever is there.
-        wp_update_post(array(
+        // Also apply the staged replacement post_title, but only when one is set —
+        // an empty/missing veyra_freshly_post_title leaves post_title untouched.
+        $update_args = array(
             'ID'           => $post_id,
             'post_content' => $freshly_invented[$post_id],
-        ));
+        );
+        if (isset($freshly_post_title[$post_id]) && trim((string) $freshly_post_title[$post_id]) !== '') {
+            $update_args['post_title'] = $freshly_post_title[$post_id];
+        }
+        wp_update_post($update_args);
 
         $subspecies[$post_id] = 'new_freshly_invented_content';
         $subspecies_changed   = true;

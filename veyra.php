@@ -547,11 +547,14 @@ class Veyra {
         // wp-admin, so on the front end we list the hub's registered pages explicitly.
         // Each: [ menu label, page slug, capability ].
         $hub_items = array(
-            array('Veyra Hub 1',                    'veyra-hub-1',            'edit_posts'),
-            array('Veyra Post Importer From Birch', 'veyra_post_importer',    'edit_posts'),
-            array('SM Redirect Manager',            'sm_redirect_manager',    'manage_options'),
-            array('Custom Blog Feed',               'veyra_custom_blog_feed', 'manage_options'),
-            array('Plugin Manager',                 'veyra_plugin_manager',   'manage_options'),
+            array('Veyra Hub 1',                    'veyra-hub-1',                     'edit_posts'),
+            array('Veyra Post Importer From Birch', 'veyra_post_importer',             'edit_posts'),
+            array('Plugin Manager',                 'veyra_plugin_manager',            'manage_options'),
+            array('SM Redirect Manager',            'sm_redirect_manager',             'manage_options'),
+            array('Custom Blog Feed',               'veyra_custom_blog_feed',          'manage_options'),
+            array('Page Change Drip Manager',       'page_change_drip_manager',        'manage_options'),
+            array('Veyra Site Title And Footer Mar','veyra_site_title_and_footer_mar', 'manage_options'),
+            array('veyra change wp user and pass',  'veyra_change_wp_user_and_pass',   'manage_options'),
         );
         foreach ($hub_items as $item) {
             if (!current_user_can($item[2])) {
@@ -1530,9 +1533,38 @@ class Veyra {
             return;
         }
         wp_nonce_field('veyra_wayback_save', 'veyra_wayback_nonce');
-        foreach ($this->veyra_snap_height_option_names() as $option_name) {
-            $this->veyra_render_snap_height_box($post->ID, $option_name);
-        }
+        $this->veyra_render_wayback_title_field($post->ID);
+        $this->veyra_render_snap_height_box($post->ID, 'veyra_cached_original_wayback_content');
+        $this->veyra_render_freshly_post_title_field($post->ID);
+        $this->veyra_render_snap_height_box($post->ID, 'veyra_freshly_invented_content_before_deployment_to_live_post_content');
+    }
+
+    /** Renders the single-line text input for this post's cached original wayback
+     *  post_title — one instance per post, same post-ID-keyed wp_option pattern as
+     *  the species/subspecies fields above. Sits just above the wayback-content box. */
+    private function veyra_render_wayback_title_field($post_id) {
+        $all = get_option('veyra_cached_original_wayback_post_title', array());
+        if (!is_array($all)) { $all = array(); }
+        $value = isset($all[$post_id]) ? $all[$post_id] : '';
+
+        echo '<div class="veyra-wayback-box veyra-wayback-title-box">';
+        echo '<p class="veyra-wayback-label">wp_options: veyra_cached_original_wayback_post_title</p>';
+        echo '<input type="text" class="veyra-sm-input" name="veyra_cached_original_wayback_post_title" value="' . esc_attr($value) . '" />';
+        echo '</div>';
+    }
+
+    /** Renders the single-line text input for this post's freshly-invented replacement
+     *  post_title — one instance per post, same post-ID-keyed wp_option pattern as the
+     *  wayback title field above. Sits just above the freshly-invented-content box. */
+    private function veyra_render_freshly_post_title_field($post_id) {
+        $all = get_option('veyra_freshly_post_title', array());
+        if (!is_array($all)) { $all = array(); }
+        $value = isset($all[$post_id]) ? $all[$post_id] : '';
+
+        echo '<div class="veyra-wayback-box veyra-wayback-title-box">';
+        echo '<p class="veyra-wayback-label">wp_options: veyra_freshly_post_title</p>';
+        echo '<input type="text" class="veyra-sm-input" name="veyra_freshly_post_title" value="' . esc_attr($value) . '" />';
+        echo '</div>';
     }
 
     /** Renders one snap-height labeled textarea box for a given post-ID-keyed wp_option. */
@@ -1562,6 +1594,30 @@ class Veyra {
         if (wp_is_post_revision($post_id)) { return; }
         if (!isset($_POST['veyra_wayback_nonce']) || !wp_verify_nonce($_POST['veyra_wayback_nonce'], 'veyra_wayback_save')) { return; }
         if (!current_user_can('edit_post', $post_id)) { return; }
+
+        if (isset($_POST['veyra_cached_original_wayback_post_title'])) {
+            $title_value = sanitize_text_field(wp_unslash($_POST['veyra_cached_original_wayback_post_title']));
+            $all_titles = get_option('veyra_cached_original_wayback_post_title', array());
+            if (!is_array($all_titles)) { $all_titles = array(); }
+            if ($title_value === '') {
+                unset($all_titles[$post_id]);
+            } else {
+                $all_titles[$post_id] = $title_value;
+            }
+            update_option('veyra_cached_original_wayback_post_title', $all_titles);
+        }
+
+        if (isset($_POST['veyra_freshly_post_title'])) {
+            $freshly_title_value = sanitize_text_field(wp_unslash($_POST['veyra_freshly_post_title']));
+            $all_freshly_titles = get_option('veyra_freshly_post_title', array());
+            if (!is_array($all_freshly_titles)) { $all_freshly_titles = array(); }
+            if ($freshly_title_value === '') {
+                unset($all_freshly_titles[$post_id]);
+            } else {
+                $all_freshly_titles[$post_id] = $freshly_title_value;
+            }
+            update_option('veyra_freshly_post_title', $all_freshly_titles);
+        }
 
         foreach ($this->veyra_snap_height_option_names() as $option_name) {
             $this->veyra_save_snap_height_field($post_id, $option_name);
