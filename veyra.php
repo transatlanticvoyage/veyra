@@ -112,6 +112,22 @@ class Veyra {
         add_action('admin_print_styles-post.php', array($this, 'veyra_sm_editor_styles'));
         add_action('admin_print_styles-post-new.php', array($this, 'veyra_sm_editor_styles'));
         add_action('admin_print_footer_scripts', array($this, 'veyra_sm_editor_js'));
+
+        // "should_remain_rolled_off" column on the native Posts list screen (edit.php).
+        // Adds a column to the LEFT of the checkbox with a toggle switch. State is
+        // backed by a single wp_option ('should_remain_rolled_off_of_homepage')
+        // keyed by post ID (value 1 = TRUE), so each post owns exactly one entry;
+        // absence of a key means FALSE. Mirrors the veyra_content_species pattern.
+        add_filter('manage_post_posts_columns', array($this, 'veyra_srro_add_column'));
+        add_action('manage_post_posts_custom_column', array($this, 'veyra_srro_render_column'), 10, 2);
+        add_action('wp_ajax_veyra_toggle_srro', array($this, 'ajax_toggle_srro'));
+        add_action('admin_footer-edit.php', array($this, 'veyra_srro_footer_assets'));
+
+        // "Blog pages show at most" (posts_per_page) controller placed on edit.php
+        // next to the Add Post button, plus a dynamic "ROLLED-OFF POSTS BELOW"
+        // separator row inserted into the list after the Nth published row.
+        add_action('wp_ajax_veyra_save_posts_per_page', array($this, 'ajax_save_posts_per_page'));
+        add_action('admin_footer-edit.php', array($this, 'veyra_reading_controls_footer_assets'));
     }
     
     /**
@@ -1514,6 +1530,275 @@ class Veyra {
             }
             update_option('veyra_content_subspecies', $all_subspecies);
         }
+    }
+
+    /* ---------------------------------------------------------------------
+     * should_remain_rolled_off column (Posts list screen)
+     * ------------------------------------------------------------------- */
+
+    /** Single wp_option storing { post_id => 1 } for posts flagged TRUE. Absence = FALSE. */
+    const VEYRA_SRRO_OPTION = 'should_remain_rolled_off_of_homepage';
+
+    /** Read the map, always as an array. */
+    private function veyra_srro_get_map() {
+        $map = get_option(self::VEYRA_SRRO_OPTION, array());
+        return is_array($map) ? $map : array();
+    }
+
+    /** Whether a given post is flagged TRUE. */
+    private function veyra_srro_is_on($post_id) {
+        $map = $this->veyra_srro_get_map();
+        return !empty($map[$post_id]);
+    }
+
+    /** Add the column to the LEFT of the checkbox (cb) on the Posts list screen. */
+    public function veyra_srro_add_column($columns) {
+        $new = array();
+        // Prepend our column so it renders before the checkbox column.
+        $new['veyra_srro'] = '<span class="veyra-srro-th">should_remain<br>_rolled_off</span>';
+        foreach ($columns as $key => $label) {
+            $new[$key] = $label;
+        }
+        return $new;
+    }
+
+    /** Render the toggle switch in each row for our column. */
+    public function veyra_srro_render_column($column, $post_id) {
+        if ($column !== 'veyra_srro') {
+            return;
+        }
+        $on = $this->veyra_srro_is_on($post_id);
+        printf(
+            '<button type="button" class="veyra-srro-toggle%s" data-post="%d" role="switch" aria-checked="%s" title="should_remain_rolled_off_of_homepage: %s"><span class="veyra-srro-knob"></span></button>',
+            $on ? ' is-on' : '',
+            (int) $post_id,
+            $on ? 'true' : 'false',
+            $on ? 'TRUE' : 'FALSE'
+        );
+    }
+
+    /** AJAX: flip the boolean for a post and persist the single option. */
+    public function ajax_toggle_srro() {
+        check_ajax_referer('veyra_elephant_tools', 'nonce');
+        if (!current_user_can('edit_posts')) {
+            wp_send_json_error('Unauthorized');
+        }
+        $post_id = isset($_POST['post_id']) ? intval($_POST['post_id']) : 0;
+        if (!$post_id) {
+            wp_send_json_error('Invalid post id');
+        }
+        $map = $this->veyra_srro_get_map();
+        $new_on = empty($map[$post_id]); // toggle
+        if ($new_on) {
+            $map[$post_id] = 1;
+        } else {
+            unset($map[$post_id]);
+        }
+        update_option(self::VEYRA_SRRO_OPTION, $map);
+        wp_send_json_success(array('post_id' => $post_id, 'on' => $new_on ? 1 : 0));
+    }
+
+    /** Inline CSS + JS for the toggle, only on the Posts list screen. */
+    public function veyra_srro_footer_assets() {
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+        if (!$screen || $screen->base !== 'edit' || $screen->post_type !== 'post') {
+            return;
+        }
+        $nonce = wp_create_nonce('veyra_elephant_tools');
+        ?>
+        <style>
+            .column-veyra_srro { width: 90px; text-align: center; }
+            .veyra-srro-th { display: inline-block; line-height: 1.2; font-weight: 600; }
+            .veyra-srro-toggle {
+                position: relative; width: 34px; height: 18px; border-radius: 9px;
+                border: none; padding: 0; cursor: pointer; background-color: #cbd5e1;
+                transition: background-color 0.2s; vertical-align: middle;
+            }
+            .veyra-srro-toggle.is-on { background-color: #2563eb; }
+            .veyra-srro-toggle.is-busy { opacity: 0.5; cursor: wait; }
+            .veyra-srro-knob {
+                position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+                border-radius: 50%; background-color: #fff; transition: left 0.2s;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+            }
+            .veyra-srro-toggle.is-on .veyra-srro-knob { left: 18px; }
+        </style>
+        <script>
+        (function(){
+            var AJAX_URL = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+            var NONCE = <?php echo wp_json_encode($nonce); ?>;
+            document.addEventListener('click', function(e){
+                var btn = e.target.closest ? e.target.closest('.veyra-srro-toggle') : null;
+                if (!btn) return;
+                e.preventDefault();
+                if (btn.classList.contains('is-busy')) return;
+                btn.classList.add('is-busy');
+                var postId = btn.getAttribute('data-post');
+                var body = new URLSearchParams();
+                body.append('action', 'veyra_toggle_srro');
+                body.append('nonce', NONCE);
+                body.append('post_id', postId);
+                fetch(AJAX_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+                    .then(function(r){ return r.json(); })
+                    .then(function(res){
+                        if (res && res.success) {
+                            var on = !!res.data.on;
+                            btn.classList.toggle('is-on', on);
+                            btn.setAttribute('aria-checked', on ? 'true' : 'false');
+                            btn.setAttribute('title', 'should_remain_rolled_off_of_homepage: ' + (on ? 'TRUE' : 'FALSE'));
+                        } else {
+                            alert('Failed to toggle: ' + (res && res.data ? res.data : 'unknown error'));
+                        }
+                    })
+                    .catch(function(err){ alert('Toggle request failed: ' + err.message); })
+                    .finally(function(){ btn.classList.remove('is-busy'); });
+            });
+        })();
+        </script>
+        <?php
+    }
+
+    /* ---------------------------------------------------------------------
+     * "Blog pages show at most" (posts_per_page) controller + rolled-off separator
+     * ------------------------------------------------------------------- */
+
+    /** AJAX: save the "Blog pages show at most" setting (posts_per_page). */
+    public function ajax_save_posts_per_page() {
+        check_ajax_referer('veyra_elephant_tools', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Unauthorized');
+        }
+        $n = isset($_POST['value']) ? intval($_POST['value']) : 0;
+        if ($n < 1) {
+            wp_send_json_error('Value must be a whole number of 1 or greater.');
+        }
+        update_option('posts_per_page', $n);
+        wp_send_json_success(array('value' => $n));
+    }
+
+    /**
+     * On the Posts list screen: inject a "Blog pages show at most" controller next
+     * to the Add Post button, and insert a bold "ROLLED-OFF POSTS BELOW" separator
+     * row into the list after the Nth published post (N = posts_per_page).
+     */
+    public function veyra_reading_controls_footer_assets() {
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+        if (!$screen || $screen->base !== 'edit' || $screen->post_type !== 'post') {
+            return;
+        }
+        $per_page  = (int) get_option('posts_per_page', 10);
+        $can_edit  = current_user_can('manage_options');
+        $nonce     = wp_create_nonce('veyra_elephant_tools');
+        ?>
+        <style>
+            .veyra-reading-ctl {
+                display: inline-flex; align-items: center; gap: 6px; margin-left: 10px;
+                vertical-align: middle; font-size: 13px;
+                background: #f6f7f7; border: 1px solid #c3c4c7; border-radius: 4px; padding: 3px 8px;
+            }
+            .veyra-reading-ctl input[type="number"] { width: 64px; }
+            .veyra-reading-ctl .veyra-reading-status { color: #46b450; font-weight: 600; }
+            tr.veyra-rolloff-separator td {
+                height: 20px; line-height: 20px; padding: 0 10px;
+                background: #111827; color: #fff; font-weight: 700; letter-spacing: 0.02em;
+                font-size: 12px; text-transform: uppercase;
+            }
+        </style>
+        <script>
+        (function(){
+            var AJAX_URL = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+            var NONCE = <?php echo wp_json_encode($nonce); ?>;
+            var CAN_EDIT = <?php echo $can_edit ? 'true' : 'false'; ?>;
+            var perPage = <?php echo (int) $per_page; ?>;
+
+            // --- 1) Controller next to the "Add Post" button -----------------
+            function buildController(){
+                if (!CAN_EDIT) return;
+                var addBtn = document.querySelector('.wrap .page-title-action');
+                if (!addBtn || document.querySelector('.veyra-reading-ctl')) return;
+
+                var wrap = document.createElement('span');
+                wrap.className = 'veyra-reading-ctl';
+                wrap.innerHTML = '<span>Blog pages show at most</span>'
+                    + '<input type="number" min="1" step="1" class="veyra-reading-input" value="' + perPage + '"> '
+                    + '<span>posts</span>'
+                    + '<button type="button" class="button button-primary veyra-reading-save">Save</button>'
+                    + '<span class="veyra-reading-status"></span>';
+                addBtn.insertAdjacentElement('afterend', wrap);
+
+                var input  = wrap.querySelector('.veyra-reading-input');
+                var save   = wrap.querySelector('.veyra-reading-save');
+                var status = wrap.querySelector('.veyra-reading-status');
+
+                save.addEventListener('click', function(){
+                    var val = parseInt(input.value, 10);
+                    if (!val || val < 1) { status.style.color = '#dc3232'; status.textContent = 'enter a number ≥ 1'; return; }
+                    save.disabled = true; status.style.color = '#787c82'; status.textContent = 'saving…';
+                    var body = new URLSearchParams();
+                    body.append('action', 'veyra_save_posts_per_page');
+                    body.append('nonce', NONCE);
+                    body.append('value', val);
+                    fetch(AJAX_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+                        .then(function(r){ return r.json(); })
+                        .then(function(res){
+                            if (res && res.success) {
+                                perPage = res.data.value;
+                                status.style.color = '#46b450'; status.textContent = '✓ saved';
+                                insertSeparator(); // reposition the rolled-off line
+                            } else {
+                                status.style.color = '#dc3232'; status.textContent = (res && res.data) ? res.data : 'save failed';
+                            }
+                        })
+                        .catch(function(err){ status.style.color = '#dc3232'; status.textContent = 'failed: ' + err.message; })
+                        .finally(function(){ save.disabled = false; setTimeout(function(){ status.textContent=''; }, 4000); });
+                });
+            }
+
+            // --- 2) "ROLLED-OFF POSTS BELOW" separator row -------------------
+            function insertSeparator(){
+                var tbody = document.getElementById('the-list');
+                if (!tbody) return;
+
+                // remove any prior separator we inserted
+                var old = tbody.querySelector('tr.veyra-rolloff-separator');
+                if (old) old.parentNode.removeChild(old);
+
+                // count published post rows in display order; the front-end feed
+                // page 1 holds the first `perPage` published posts — the rest are
+                // "rolled off" the homepage feed.
+                var rows = tbody.querySelectorAll('tr[id^="post-"]');
+                var publishedSeen = 0, anchor = null;
+                for (var i = 0; i < rows.length; i++) {
+                    if (rows[i].className.indexOf('status-publish') === -1) continue;
+                    publishedSeen++;
+                    if (publishedSeen === perPage) { anchor = rows[i]; break; }
+                }
+                // Only show the separator if there is at least one published row
+                // AFTER the cutoff (i.e. something actually rolled off on this page).
+                if (!anchor) return;
+                var hasBelow = false, n = anchor.nextElementSibling;
+                while (n) { if (n.id && n.id.indexOf('post-') === 0 && n.className.indexOf('status-publish') !== -1) { hasBelow = true; break; } n = n.nextElementSibling; }
+                if (!hasBelow) return;
+
+                var colCount = (document.querySelectorAll('#the-list').length && tbody.rows[0]) ? tbody.rows[0].cells.length : 1;
+                var tr = document.createElement('tr');
+                tr.className = 'veyra-rolloff-separator';
+                var td = document.createElement('td');
+                td.colSpan = colCount;
+                td.textContent = 'ROLLED-OFF POSTS BELOW (not no feed page)';
+                tr.appendChild(td);
+                anchor.parentNode.insertBefore(tr, anchor.nextSibling);
+            }
+
+            function init(){ buildController(); insertSeparator(); }
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', init);
+            } else {
+                init();
+            }
+        })();
+        </script>
+        <?php
     }
 
     /** Option names backing the snap-height paste boxes rendered below the post_content editor. */
