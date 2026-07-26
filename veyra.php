@@ -2463,15 +2463,53 @@ class Veyra {
                 while (n) { if (n.id && n.id.indexOf('post-') === 0 && n.className.indexOf('status-publish') !== -1) { hasBelow = true; break; } n = n.nextElementSibling; }
                 if (!hasBelow) return;
 
-                var colCount = (document.querySelectorAll('#the-list').length && tbody.rows[0]) ? tbody.rows[0].cells.length : 1;
                 var tr = document.createElement('tr');
                 tr.className = 'veyra-rolloff-separator';
                 var td = document.createElement('td');
-                td.colSpan = colCount;
+                td.colSpan = visibleColumnCount();
                 td.textContent = 'ROLLED-OFF POSTS BELOW (not no feed page)';
                 tr.appendChild(td);
                 anchor.parentNode.insertBefore(tr, anchor.nextSibling);
             }
+
+            /**
+             * Count only the columns actually being rendered.
+             *
+             * Hidden columns (Screen Options / our toggles) are display:none, so they
+             * form no column in the table. Spanning them anyway — the old code used
+             * tbody.rows[0].cells.length, which counts hidden cells — makes the colSpan
+             * exceed the real column count, and the browser invents anonymous columns
+             * to make up the difference. In this table-layout:fixed table the free
+             * space is then split evenly between Title and those phantom columns, so
+             * Title collapses (measured: 1078px -> 216px with 4 hidden columns) and the
+             * remainder shows up as dead space. That is why the wasted space only ever
+             * appeared once this separator row was on screen.
+             */
+            function visibleColumnCount(){
+                var head = document.querySelector('.wp-list-table thead tr');
+                if (!head) { return 1; }
+                var n = 0;
+                for (var i = 0; i < head.cells.length; i++) {
+                    if (window.getComputedStyle(head.cells[i]).display !== 'none') { n++; }
+                }
+                return n || 1;
+            }
+
+            /** Keep the span correct when columns are shown/hidden without a reload. */
+            function refreshSeparatorSpan(){
+                var td = document.querySelector('tr.veyra-rolloff-separator > td');
+                if (td) { td.colSpan = visibleColumnCount(); }
+            }
+
+            // Column visibility changes come from core's Screen Options checkboxes and
+            // from the link_synopsis toggles, both of which act without a page reload.
+            document.addEventListener('click', function(e){
+                if (!e.target.closest) { return; }
+                if (e.target.closest('.hide-column-tog') || e.target.closest('.veyra-lsyn-cols input[data-col]')) {
+                    // Let the other handler finish toggling before re-measuring.
+                    setTimeout(refreshSeparatorSpan, 0);
+                }
+            });
 
             function init(){ buildController(); insertSeparator(); }
             if (document.readyState === 'loading') {
