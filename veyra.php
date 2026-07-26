@@ -146,6 +146,7 @@ class Veyra {
         add_action('wp_ajax_veyra_lsyn_scan_batch', array($this, 'ajax_lsyn_scan_batch'));
         add_action('wp_ajax_veyra_lsyn_finish', array($this, 'ajax_lsyn_finish'));
         add_action('admin_footer-edit.php', array($this, 'veyra_lsyn_footer_assets'));
+        add_filter('default_hidden_columns', array($this, 'veyra_lsyn_default_hidden_columns'), 10, 2);
     }
     
     /**
@@ -1685,7 +1686,9 @@ class Veyra {
      * post, and each post is written independently so a batched re-scan can never
      * clobber another post's data the way a single shared option blob would.
      *
-     * Shape: [ { anchor, target_url, is_nofollow: "yes"|"no", rel_raw, position } ]
+     * Shape: [ { anchor, target_url, is_nofollow: true|false, rel_raw, position } ]
+     * is_nofollow is a real JSON boolean, so it round-trips as true/false rather
+     * than as a "yes"/"no" string that every consumer would have to interpret.
      * Absent meta   = never scanned.
      * Empty array   = scanned, no outbound links found.
      * ------------------------------------------------------------------- */
@@ -1814,12 +1817,27 @@ class Veyra {
             $links[] = array(
                 'anchor'      => $anchor,
                 'target_url'  => $href,
-                'is_nofollow' => $is_nofollow ? 'yes' : 'no',
+                'is_nofollow' => $is_nofollow, // real boolean -> true/false in the JSON
                 'rel_raw'     => $rel_raw,
                 'position'    => $position++,
             );
         }
         return $links;
+    }
+
+    /**
+     * Coerce a stored is_nofollow value to a boolean. Rows written before this field
+     * became a real boolean hold the string "yes"/"no", so they keep rendering
+     * correctly until the next refresh overwrites them.
+     */
+    private function veyra_lsyn_is_nofollow_value($value) {
+        if (is_bool($value)) {
+            return $value;
+        }
+        if (is_string($value)) {
+            return in_array(strtolower(trim($value)), array('true', 'yes', '1'), true);
+        }
+        return (bool) $value;
     }
 
     /** Read a post's stored links. Returns null when the post has never been scanned. */
@@ -1891,14 +1909,18 @@ class Veyra {
 
         echo '<table class="veyra-lsyn-tbl"><tbody>';
         foreach ($links as $link) {
-            $nofollow = (isset($link['is_nofollow']) && $link['is_nofollow'] === 'yes');
+            $nofollow = $this->veyra_lsyn_is_nofollow_value(isset($link['is_nofollow']) ? $link['is_nofollow'] : false);
             $anchor   = $this->veyra_lsyn_truncate_cell(isset($link['anchor']) ? $link['anchor'] : '', 26);
             $raw_url  = isset($link['target_url']) ? $link['target_url'] : '';
             $url      = $this->veyra_lsyn_truncate_cell($raw_url, 32);
+            // The value is wrapped in .veyra-lsyn-val (which does the ellipsis) while
+            // the ⓘ sits outside it, so overflow clipping can never hide the icon.
             printf(
-                '<tr><td class="veyra-lsyn-nf %s">%s</td><td class="veyra-lsyn-anchor">%s%s</td><td class="veyra-lsyn-url"><a href="%s" target="_blank" rel="noopener noreferrer">%s</a>%s</td></tr>',
+                '<tr><td class="veyra-lsyn-nf %s">%s</td>'
+                . '<td class="veyra-lsyn-anchor"><span class="veyra-lsyn-val">%s</span>%s</td>'
+                . '<td class="veyra-lsyn-url"><a class="veyra-lsyn-val" href="%s" target="_blank" rel="noopener noreferrer">%s</a>%s</td></tr>',
                 $nofollow ? 'is-nofollow' : 'is-follow',
-                $nofollow ? 'yes' : 'no',
+                $nofollow ? 'TRUE' : 'FALSE',
                 $anchor['text'],
                 $anchor['tip'],
                 esc_url($raw_url),
@@ -1907,6 +1929,23 @@ class Veyra {
             );
         }
         echo '</tbody></table>';
+    }
+
+    /** Columns hidden by default on the posts list, so Title gets a usable width. */
+    private function veyra_lsyn_toggleable_columns() {
+        return array('author', 'categories', 'tags', 'comments');
+    }
+
+    /**
+     * Hide the noisy columns by default on the Posts list screen. This filter only
+     * applies when the user has no saved preference, so once someone toggles a
+     * column their own choice wins from then on.
+     */
+    public function veyra_lsyn_default_hidden_columns($hidden, $screen) {
+        if (!$screen || $screen->id !== 'edit-post') {
+            return $hidden;
+        }
+        return array_values(array_unique(array_merge((array) $hidden, $this->veyra_lsyn_toggleable_columns())));
     }
 
     /** Human-readable "last run" label, or an empty string if it has never run. */
@@ -1986,17 +2025,48 @@ class Veyra {
         $nonce = wp_create_nonce('veyra_elephant_tools');
         ?>
         <style>
-            .column-veyra_lsyn { width: 360px; }
+            /* A percentage, not a fixed 360px: the posts list is table-layout:fixed,
+               so a pixel width is taken off the top and the Title column absorbs the
+               entire loss. A percentage shares the squeeze with the other columns. */
+            .fixed .column-veyra_lsyn { width: 22%; }
+            /* Narrow these if they get toggled back on, so Title keeps usable width.
+               Core sets author 10%, categories/tags 15%, comments 5.5em. */
+            .fixed .column-author { width: 8%; }
+            .fixed .column-categories,
+            .fixed .column-tags { width: 10%; }
+            .fixed .column-comments { width: 4em; }
+
             .veyra-lsyn-th { display: inline-block; font-weight: 700; text-transform: lowercase; }
             .veyra-lsyn-empty { color: #a7aaad; font-style: italic; font-size: 11px; }
-            .veyra-lsyn-tbl { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 11px; line-height: 1.35; }
-            .veyra-lsyn-tbl td { padding: 1px 6px 1px 0; border: none; vertical-align: top; word-break: break-word; }
+            .veyra-lsyn-tbl { border-collapse: collapse; width: 100%; table-layout: fixed; margin: 0; }
+            /* "table.veyra-lsyn-tbl td" (0,1,2) deliberately outweighs core's
+               ".widefat td" (0,1,1). That rule targets these nested cells DIRECTLY
+               with padding:8px 10px, font-size:13px and line-height:1.5em — and a
+               directly-matching declaration always beats a value inherited from the
+               parent table, so setting the font on .veyra-lsyn-tbl alone did nothing.
+               Every mini-table row was rendering at core's 13px/8px-padded size:
+               ~35px per link instead of ~16px. */
+            table.veyra-lsyn-tbl td {
+                padding: 0 6px 0 0;
+                border: none;
+                font-size: 11px;
+                line-height: 1.5;
+                vertical-align: top;
+                white-space: nowrap;
+            }
             .veyra-lsyn-tbl tr:nth-child(even) td { background: #f6f7f7; }
-            .veyra-lsyn-nf { width: 30px; text-align: center; font-weight: 600; }
+            .veyra-lsyn-nf { width: 44px; text-align: center; font-weight: 600; }
             .veyra-lsyn-nf.is-nofollow { color: #b32d2e; }
             .veyra-lsyn-nf.is-follow { color: #2271b1; }
-            .veyra-lsyn-anchor { width: 42%; }
+            .veyra-lsyn-anchor { width: 40%; }
             .veyra-lsyn-url a { text-decoration: none; }
+            /* Guarantees one line per link: the value ellipsises inside its own box
+               while the ⓘ stays outside it and can never be clipped away. */
+            .veyra-lsyn-val {
+                display: inline-block; max-width: calc(100% - 14px);
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                vertical-align: bottom;
+            }
             .veyra-lsyn-tip {
                 display: inline-block; margin-left: 3px; cursor: help; color: #2271b1;
                 font-size: 12px; line-height: 1; vertical-align: baseline;
@@ -2011,6 +2081,14 @@ class Veyra {
             }
             .veyra-lsyn-refresh-wrap { display: inline-flex; align-items: center; gap: 8px; margin-left: 10px; vertical-align: middle; }
             .veyra-lsyn-lastrun { font-size: 12px; color: #646970; font-style: italic; }
+            .veyra-lsyn-cols {
+                display: inline-flex; align-items: center; gap: 10px; margin-left: 10px;
+                vertical-align: middle; font-size: 12px;
+                background: #f6f7f7; border: 1px solid #c3c4c7; border-radius: 4px; padding: 3px 8px;
+            }
+            .veyra-lsyn-cols-label { color: #646970; font-weight: 600; }
+            .veyra-lsyn-cols label { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+            .veyra-lsyn-cols input[type="checkbox"] { margin: 0; }
             .veyra-lsyn-progress { margin: 10px 0 4px 0; max-width: 620px; }
             .veyra-lsyn-progress-track { height: 14px; background: #dcdcde; border-radius: 7px; overflow: hidden; }
             .veyra-lsyn-progress-fill { display: block; height: 100%; width: 0; background: #2271b1; transition: width 0.2s ease; }
@@ -2023,6 +2101,7 @@ class Veyra {
             var AJAX_URL = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
             var NONCE = <?php echo wp_json_encode($nonce); ?>;
             var LAST_RUN = <?php echo wp_json_encode($this->veyra_lsyn_last_refresh_label()); ?>;
+            var TOGGLE_COLUMNS = <?php echo wp_json_encode($this->veyra_lsyn_toggleable_columns()); ?>;
 
             function post(action, extra){
                 var body = new URLSearchParams();
@@ -2119,7 +2198,69 @@ class Veyra {
 
                 els.lastrun.textContent = LAST_RUN;
                 els.button.addEventListener('click', runRefresh);
+
+                buildColumnToggles(wrap);
                 return true;
+            }
+
+            // --- Column show/hide toggles -----------------------------------
+            // These proxy to WordPress's own Screen Options checkboxes rather than
+            // reimplementing persistence: clicking .hide-column-tog fires core's
+            // handler, which shows/hides the column AND saves the choice to user meta
+            // (action=hidden-columns). So the setting survives reloads for free and
+            // our toggles can never disagree with the Screen Options panel.
+            function coreToggleFor(col){
+                return document.getElementById(col + '-hide');
+            }
+
+            function columnIsVisible(col){
+                var core = coreToggleFor(col);
+                if (core) return core.checked;
+                var th = document.querySelector('th.column-' + col);
+                return !!th && !th.classList.contains('hidden');
+            }
+
+            function buildColumnToggles(anchorEl){
+                if (document.querySelector('.veyra-lsyn-cols')) return;
+
+                var available = TOGGLE_COLUMNS.filter(function(col){
+                    return coreToggleFor(col) || document.querySelector('th.column-' + col);
+                });
+                if (!available.length) return;
+
+                var box = document.createElement('span');
+                box.className = 'veyra-lsyn-cols';
+                box.innerHTML = '<span class="veyra-lsyn-cols-label">show columns:</span>'
+                    + available.map(function(col){
+                        return '<label><input type="checkbox" data-col="' + col + '"'
+                             + (columnIsVisible(col) ? ' checked' : '') + '> ' + col + '</label>';
+                    }).join('');
+                anchorEl.insertAdjacentElement('afterend', box);
+
+                box.addEventListener('change', function(e){
+                    var input = e.target;
+                    if (!input.matches('input[data-col]')) return;
+                    var col = input.getAttribute('data-col');
+                    var core = coreToggleFor(col);
+                    if (core) {
+                        // .click() flips checked AND fires the event core listens for.
+                        if (core.checked !== input.checked) { core.click(); }
+                    } else {
+                        // No Screen Options panel on this screen — toggle for the
+                        // current view only (nothing to persist to).
+                        document.querySelectorAll('.column-' + col).forEach(function(cell){
+                            cell.classList.toggle('hidden', !input.checked);
+                        });
+                    }
+                });
+
+                // Keep our checkboxes in step if the user uses Screen Options directly.
+                document.addEventListener('click', function(e){
+                    var tog = e.target.closest ? e.target.closest('.hide-column-tog') : null;
+                    if (!tog) return;
+                    var mine = box.querySelector('input[data-col="' + tog.value + '"]');
+                    if (mine) { mine.checked = tog.checked; }
+                });
             }
 
             function setProgress(pct, message, state){
