@@ -584,7 +584,7 @@ class Veyra {
         $hub_items = array(
             array('Veyra Hub 1',                    'veyra-hub-1',                     'edit_posts'),
             array('Veyra Post Importer From Birch', 'veyra_post_importer',             'edit_posts'),
-            array('Plugin Manager',                 'veyra_plugin_manager',            'manage_options'),
+            array('Plugin Updater',                 'veyra_plugin_manager',            'manage_options'),
             array('SM Redirect Manager',            'sm_redirect_manager',             'manage_options'),
             array('Custom Blog Feed',               'veyra_custom_blog_feed',          'manage_options'),
             array('Page Change Drip Manager',       'page_change_drip_manager',        'manage_options'),

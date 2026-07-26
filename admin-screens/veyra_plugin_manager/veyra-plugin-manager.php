@@ -77,7 +77,7 @@ function veyra_plugin_manager_register_menu() {
     add_submenu_page(
         'veyra-hub-1',                          // parent slug (Veyra Hub 1)
         'Veyra Plugin Manager',                 // page title
-        'Plugin Manager',                       // menu label
+        'Plugin Updater',                       // menu label
         'manage_options',                       // capability
         'veyra_plugin_manager',                 // page slug
         'veyra_plugin_manager_render_page'      // callback
