@@ -128,6 +128,24 @@ class Veyra {
         // separator row inserted into the list after the Nth published row.
         add_action('wp_ajax_veyra_save_posts_per_page', array($this, 'ajax_save_posts_per_page'));
         add_action('admin_footer-edit.php', array($this, 'veyra_reading_controls_footer_assets'));
+
+        // "link_synopsis" column on the native Posts list screen (edit.php).
+        // Leftmost column: a compact per-post table of the OUTBOUND links found in
+        // that post's post_content. Backed by post meta ('_veyra_link_synopsis')
+        // holding a JSON array — exactly one meta row per post, so it is removed
+        // automatically when the post is deleted and is primed in a single query by
+        // the list table's own meta cache (no per-row lookups).
+        //
+        // Priority 20 (not the default 10) so this filter always runs AFTER
+        // veyra_srro_add_column. Both callbacks PREPEND their column, so whichever
+        // runs last ends up furthest left; the explicit priority makes that ordering
+        // deterministic instead of depending on the order these lines appear here.
+        add_filter('manage_post_posts_columns', array($this, 'veyra_lsyn_add_column'), 20);
+        add_action('manage_post_posts_custom_column', array($this, 'veyra_lsyn_render_column'), 10, 2);
+        add_action('wp_ajax_veyra_lsyn_start', array($this, 'ajax_lsyn_start'));
+        add_action('wp_ajax_veyra_lsyn_scan_batch', array($this, 'ajax_lsyn_scan_batch'));
+        add_action('wp_ajax_veyra_lsyn_finish', array($this, 'ajax_lsyn_finish'));
+        add_action('admin_footer-edit.php', array($this, 'veyra_lsyn_footer_assets'));
     }
     
     /**
@@ -1653,6 +1671,524 @@ class Veyra {
                     .catch(function(err){ alert('Toggle request failed: ' + err.message); })
                     .finally(function(){ btn.classList.remove('is-busy'); });
             });
+        })();
+        </script>
+        <?php
+    }
+
+    /* ---------------------------------------------------------------------
+     * link_synopsis column (Posts list screen)
+     *
+     * Per post we store the OUTBOUND links found in post_content as a JSON array
+     * in a single post meta row. Post meta (not a wp_option) because: the list
+     * table primes the whole screen's meta in one query, the row dies with the
+     * post, and each post is written independently so a batched re-scan can never
+     * clobber another post's data the way a single shared option blob would.
+     *
+     * Shape: [ { anchor, target_url, is_nofollow: "yes"|"no", rel_raw, position } ]
+     * Absent meta   = never scanned.
+     * Empty array   = scanned, no outbound links found.
+     * ------------------------------------------------------------------- */
+
+    /** Post meta key holding the JSON link array. Underscore-prefixed = hidden from the custom-fields UI. */
+    const VEYRA_LSYN_META = '_veyra_link_synopsis';
+
+    /** Option holding the unix timestamp of the last full refresh. */
+    const VEYRA_LSYN_LAST_REFRESH_OPTION = 'veyra_link_synopsis_last_refresh';
+
+    /** How many posts each AJAX batch scans. */
+    const VEYRA_LSYN_BATCH_SIZE = 25;
+
+    /**
+     * Reduce a hostname to its registrable domain, so subdomains of this site count
+     * as INTERNAL (blog.foo.com is not "outbound" from foo.com) and www./non-www are
+     * the same thing. Covers the common multi-label public suffixes; this is a
+     * pragmatic list, not the full Public Suffix List, which is fine here because a
+     * miss only means an exotic ccTLD subdomain is reported as outbound.
+     */
+    private function veyra_lsyn_registrable_domain($host) {
+        $host = strtolower(trim((string) $host, '. '));
+        if ($host === '' || filter_var($host, FILTER_VALIDATE_IP)) {
+            return $host;
+        }
+        $parts = explode('.', $host);
+        $n = count($parts);
+        if ($n <= 2) {
+            return $host;
+        }
+        $last_two = $parts[$n - 2] . '.' . $parts[$n - 1];
+        $multi_label_suffixes = array(
+            'co.uk', 'org.uk', 'me.uk', 'net.uk', 'ltd.uk', 'plc.uk', 'sch.uk', 'ac.uk', 'gov.uk',
+            'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au',
+            'co.nz', 'net.nz', 'org.nz', 'co.za', 'org.za',
+            'co.jp', 'ne.jp', 'or.jp', 'co.kr', 'com.tw', 'com.hk', 'com.sg', 'com.cn',
+            'co.in', 'net.in', 'org.in', 'com.br', 'net.br', 'com.mx', 'com.ar',
+            'com.tr', 'com.pl', 'com.ua', 'co.il',
+        );
+        if (in_array($last_two, $multi_label_suffixes, true) && $n >= 3) {
+            return $parts[$n - 3] . '.' . $last_two;
+        }
+        return $last_two;
+    }
+
+    /** This site's registrable domain, used as the internal/outbound dividing line. */
+    private function veyra_lsyn_home_domain() {
+        return $this->veyra_lsyn_registrable_domain(parse_url(home_url(), PHP_URL_HOST));
+    }
+
+    /**
+     * Is this href an outbound link? Relative URLs, bare fragments, query-only hrefs
+     * and non-web schemes (mailto:, tel:, javascript:, data:, ftp:) are all excluded;
+     * protocol-relative "//host/path" is treated as a real absolute URL.
+     */
+    private function veyra_lsyn_is_outbound($href, $home_domain) {
+        $href = trim($href);
+        if ($href === '') {
+            return false;
+        }
+        if (strpos($href, '//') === 0) {
+            $href = 'https:' . $href; // protocol-relative
+        }
+        $scheme = strtolower((string) parse_url($href, PHP_URL_SCHEME));
+        if ($scheme === '') {
+            return false; // relative path, #fragment or ?query — same site by definition
+        }
+        if ($scheme !== 'http' && $scheme !== 'https') {
+            return false; // mailto: tel: javascript: data: ftp: …
+        }
+        $host = (string) parse_url($href, PHP_URL_HOST);
+        if ($host === '') {
+            return false;
+        }
+        return $this->veyra_lsyn_registrable_domain($host) !== $home_domain;
+    }
+
+    /**
+     * Parse post_content and return its outbound links, in document order.
+     * DOMDocument rather than regex, so entity-encoded hrefs, odd quoting and
+     * attribute order are all handled by a real parser.
+     */
+    private function veyra_lsyn_extract_links($html, $home_domain) {
+        $links = array();
+        $html  = (string) $html;
+        if (trim($html) === '' || stripos($html, '<a') === false) {
+            return $links;
+        }
+
+        $previous = libxml_use_internal_errors(true);
+        $doc = new DOMDocument();
+        // The meta charset makes libxml treat the fragment as UTF-8; the wrapper div
+        // keeps loadHTML from complaining about a missing root element.
+        $loaded = $doc->loadHTML(
+            '<meta http-equiv="Content-Type" content="text/html; charset=utf-8"><div>' . $html . '</div>'
+        );
+        libxml_clear_errors();
+        libxml_use_internal_errors($previous);
+        if (!$loaded) {
+            return $links;
+        }
+
+        $position = 0;
+        foreach ($doc->getElementsByTagName('a') as $a) {
+            $href = trim($a->getAttribute('href'));
+            if (!$this->veyra_lsyn_is_outbound($href, $home_domain)) {
+                continue;
+            }
+
+            // rel parsed token-wise: rel="nofollow noopener" must match, and
+            // sponsored/ugc are treated as nofollow because they behave the same way.
+            $rel_raw = trim($a->getAttribute('rel'));
+            $tokens  = $rel_raw === '' ? array() : preg_split('/\s+/', strtolower($rel_raw), -1, PREG_SPLIT_NO_EMPTY);
+            $is_nofollow = (bool) array_intersect($tokens, array('nofollow', 'sponsored', 'ugc'));
+
+            $anchor = trim(preg_replace('/\s+/u', ' ', $a->textContent));
+            if ($anchor === '') {
+                // Image link: fall back to the alt text so the row isn't blank.
+                $imgs = $a->getElementsByTagName('img');
+                if ($imgs->length) {
+                    $alt = trim($imgs->item(0)->getAttribute('alt'));
+                    $anchor = $alt !== '' ? '[img] ' . $alt : '[img]';
+                }
+            }
+
+            $links[] = array(
+                'anchor'      => $anchor,
+                'target_url'  => $href,
+                'is_nofollow' => $is_nofollow ? 'yes' : 'no',
+                'rel_raw'     => $rel_raw,
+                'position'    => $position++,
+            );
+        }
+        return $links;
+    }
+
+    /** Read a post's stored links. Returns null when the post has never been scanned. */
+    private function veyra_lsyn_get_links($post_id) {
+        $raw = get_post_meta($post_id, self::VEYRA_LSYN_META, true);
+        if ($raw === '' || $raw === null || $raw === false) {
+            return null;
+        }
+        if (is_array($raw)) {
+            return $raw;
+        }
+        $decoded = json_decode($raw, true);
+        return is_array($decoded) ? $decoded : null;
+    }
+
+    /** Scan one post and persist its links. Returns the number of outbound links found. */
+    private function veyra_lsyn_scan_post($post, $home_domain) {
+        $links = $this->veyra_lsyn_extract_links($post->post_content, $home_domain);
+        // wp_slash: update_post_meta runs the value through wp_unslash(), which would
+        // otherwise strip backslashes out of JSON escape sequences in anchor text.
+        update_post_meta($post->ID, self::VEYRA_LSYN_META, wp_slash(wp_json_encode($links)));
+        return count($links);
+    }
+
+    /** Add the link_synopsis column, prepended so it lands leftmost (see priority 20 in the constructor). */
+    public function veyra_lsyn_add_column($columns) {
+        $new = array('veyra_lsyn' => '<span class="veyra-lsyn-th">link_synopsis</span>');
+        foreach ($columns as $key => $label) {
+            $new[$key] = $label;
+        }
+        return $new;
+    }
+
+    /**
+     * Split a value into escaped display text plus (when it was truncated) a hover ⓘ
+     * that reveals the full string. Returned as two pieces so the caller can keep the
+     * icon OUTSIDE a surrounding <a>, otherwise clicking the icon would follow the link.
+     *
+     * The tooltip is driven by data-veyra-tip rather than the native title attribute,
+     * which has a ~1s delay, can't be styled and wraps long URLs badly.
+     */
+    private function veyra_lsyn_truncate_cell($text, $limit) {
+        $text = (string) $text;
+        $len  = function_exists('mb_strlen') ? mb_strlen($text, 'UTF-8') : strlen($text);
+        if ($len <= $limit) {
+            return array('text' => esc_html($text), 'tip' => '');
+        }
+        $short = function_exists('mb_substr') ? mb_substr($text, 0, $limit, 'UTF-8') : substr($text, 0, $limit);
+        return array(
+            'text' => esc_html($short) . '…',
+            'tip'  => '<span class="veyra-lsyn-tip" tabindex="0" role="button" aria-label="show full value" data-veyra-tip="' . esc_attr($text) . '">&#9432;</span>',
+        );
+    }
+
+    /** Render the compact per-post links table inside our column's cell. */
+    public function veyra_lsyn_render_column($column, $post_id) {
+        if ($column !== 'veyra_lsyn') {
+            return;
+        }
+        $links = $this->veyra_lsyn_get_links($post_id);
+        if ($links === null) {
+            echo '<span class="veyra-lsyn-empty">not scanned</span>';
+            return;
+        }
+        if (!$links) {
+            echo '<span class="veyra-lsyn-empty">no outbound links</span>';
+            return;
+        }
+
+        echo '<table class="veyra-lsyn-tbl"><tbody>';
+        foreach ($links as $link) {
+            $nofollow = (isset($link['is_nofollow']) && $link['is_nofollow'] === 'yes');
+            $anchor   = $this->veyra_lsyn_truncate_cell(isset($link['anchor']) ? $link['anchor'] : '', 26);
+            $raw_url  = isset($link['target_url']) ? $link['target_url'] : '';
+            $url      = $this->veyra_lsyn_truncate_cell($raw_url, 32);
+            printf(
+                '<tr><td class="veyra-lsyn-nf %s">%s</td><td class="veyra-lsyn-anchor">%s%s</td><td class="veyra-lsyn-url"><a href="%s" target="_blank" rel="noopener noreferrer">%s</a>%s</td></tr>',
+                $nofollow ? 'is-nofollow' : 'is-follow',
+                $nofollow ? 'yes' : 'no',
+                $anchor['text'],
+                $anchor['tip'],
+                esc_url($raw_url),
+                $url['text'],
+                $url['tip']
+            );
+        }
+        echo '</tbody></table>';
+    }
+
+    /** Human-readable "last run" label, or an empty string if it has never run. */
+    private function veyra_lsyn_last_refresh_label() {
+        $ts = (int) get_option(self::VEYRA_LSYN_LAST_REFRESH_OPTION, 0);
+        if (!$ts) {
+            return '';
+        }
+        return 'last run: ' . wp_date('M j, Y g:i a', $ts);
+    }
+
+    /** Shared guard for the three link_synopsis AJAX endpoints. */
+    private function veyra_lsyn_ajax_guard() {
+        check_ajax_referer('veyra_elephant_tools', 'nonce');
+        if (!current_user_can('edit_posts')) {
+            wp_send_json_error('Unauthorized');
+        }
+    }
+
+    /**
+     * AJAX: return every post ID to scan. The client slices this list into batches,
+     * so the set stays fixed for the whole run (an offset/limit scheme would drift
+     * if a post were published or trashed mid-scan).
+     */
+    public function ajax_lsyn_start() {
+        $this->veyra_lsyn_ajax_guard();
+        $ids = get_posts(array(
+            'post_type'        => 'post',
+            'post_status'      => 'any', // all statuses incl. drafts; excludes trash/auto-draft
+            'posts_per_page'   => -1,
+            'fields'           => 'ids',
+            'orderby'          => 'ID',
+            'order'            => 'ASC',
+            'suppress_filters' => true,
+            'no_found_rows'    => true,
+        ));
+        wp_send_json_success(array(
+            'ids'        => array_map('intval', $ids),
+            'batch_size' => self::VEYRA_LSYN_BATCH_SIZE,
+        ));
+    }
+
+    /** AJAX: scan one batch of post IDs and store each post's links. */
+    public function ajax_lsyn_scan_batch() {
+        $this->veyra_lsyn_ajax_guard();
+        $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? array_map('intval', $_POST['ids']) : array();
+        if (!$ids) {
+            wp_send_json_error('No post ids supplied');
+        }
+        $home_domain = $this->veyra_lsyn_home_domain();
+        $scanned = 0;
+        $found   = 0;
+        foreach ($ids as $id) {
+            $post = get_post($id);
+            if (!$post || $post->post_type !== 'post') {
+                continue;
+            }
+            $found += $this->veyra_lsyn_scan_post($post, $home_domain);
+            $scanned++;
+        }
+        wp_send_json_success(array('scanned' => $scanned, 'links' => $found));
+    }
+
+    /** AJAX: stamp the completion time once every batch has finished. */
+    public function ajax_lsyn_finish() {
+        $this->veyra_lsyn_ajax_guard();
+        update_option(self::VEYRA_LSYN_LAST_REFRESH_OPTION, time(), false);
+        wp_send_json_success(array('label' => $this->veyra_lsyn_last_refresh_label()));
+    }
+
+    /** Column styles, hover tooltip, and the batched refresh button + progress bar. */
+    public function veyra_lsyn_footer_assets() {
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+        if (!$screen || $screen->base !== 'edit' || $screen->post_type !== 'post') {
+            return;
+        }
+        $nonce = wp_create_nonce('veyra_elephant_tools');
+        ?>
+        <style>
+            .column-veyra_lsyn { width: 360px; }
+            .veyra-lsyn-th { display: inline-block; font-weight: 700; text-transform: lowercase; }
+            .veyra-lsyn-empty { color: #a7aaad; font-style: italic; font-size: 11px; }
+            .veyra-lsyn-tbl { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 11px; line-height: 1.35; }
+            .veyra-lsyn-tbl td { padding: 1px 6px 1px 0; border: none; vertical-align: top; word-break: break-word; }
+            .veyra-lsyn-tbl tr:nth-child(even) td { background: #f6f7f7; }
+            .veyra-lsyn-nf { width: 30px; text-align: center; font-weight: 600; }
+            .veyra-lsyn-nf.is-nofollow { color: #b32d2e; }
+            .veyra-lsyn-nf.is-follow { color: #2271b1; }
+            .veyra-lsyn-anchor { width: 42%; }
+            .veyra-lsyn-url a { text-decoration: none; }
+            .veyra-lsyn-tip {
+                display: inline-block; margin-left: 3px; cursor: help; color: #2271b1;
+                font-size: 12px; line-height: 1; vertical-align: baseline;
+            }
+            .veyra-lsyn-tip:focus { outline: 1px solid #2271b1; }
+            /* position:fixed so the bubble escapes the list-table cell's clipping */
+            #veyra-lsyn-tooltip {
+                position: fixed; z-index: 100010; display: none; max-width: 460px;
+                background: #1d2327; color: #fff; padding: 8px 10px; border-radius: 4px;
+                font-size: 12px; line-height: 1.45; word-break: break-all;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.35);
+            }
+            .veyra-lsyn-refresh-wrap { display: inline-flex; align-items: center; gap: 8px; margin-left: 10px; vertical-align: middle; }
+            .veyra-lsyn-lastrun { font-size: 12px; color: #646970; font-style: italic; }
+            .veyra-lsyn-progress { margin: 10px 0 4px 0; max-width: 620px; }
+            .veyra-lsyn-progress-track { height: 14px; background: #dcdcde; border-radius: 7px; overflow: hidden; }
+            .veyra-lsyn-progress-fill { display: block; height: 100%; width: 0; background: #2271b1; transition: width 0.2s ease; }
+            .veyra-lsyn-progress-text { margin-top: 5px; font-size: 12px; color: #3c434a; }
+            .veyra-lsyn-progress-text.is-done { color: #46b450; font-weight: 600; }
+            .veyra-lsyn-progress-text.is-error { color: #d63638; font-weight: 600; }
+        </style>
+        <script>
+        (function(){
+            var AJAX_URL = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+            var NONCE = <?php echo wp_json_encode($nonce); ?>;
+            var LAST_RUN = <?php echo wp_json_encode($this->veyra_lsyn_last_refresh_label()); ?>;
+
+            function post(action, extra){
+                var body = new URLSearchParams();
+                body.append('action', action);
+                body.append('nonce', NONCE);
+                if (extra) { extra.forEach(function(pair){ body.append(pair[0], pair[1]); }); }
+                return fetch(AJAX_URL, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: body.toString()
+                }).then(function(r){ return r.json(); }).then(function(res){
+                    if (!res || !res.success) {
+                        throw new Error((res && res.data) ? res.data : 'request failed');
+                    }
+                    return res.data;
+                });
+            }
+
+            // --- Hover tooltip for truncated anchors / urls ------------------
+            var tip = null;
+            function tooltipEl(){
+                if (!tip) {
+                    tip = document.createElement('div');
+                    tip.id = 'veyra-lsyn-tooltip';
+                    document.body.appendChild(tip);
+                }
+                return tip;
+            }
+            function showTip(target){
+                var text = target.getAttribute('data-veyra-tip');
+                if (!text) return;
+                var el = tooltipEl();
+                el.textContent = text;
+                el.style.display = 'block';
+                el.style.left = '0px';
+                el.style.top = '0px';
+                var rect = target.getBoundingClientRect();
+                var box = el.getBoundingClientRect();
+                var left = Math.min(rect.left, window.innerWidth - box.width - 12);
+                var top = rect.bottom + 6;
+                if (top + box.height > window.innerHeight - 8) { top = rect.top - box.height - 6; }
+                el.style.left = Math.max(8, left) + 'px';
+                el.style.top = Math.max(8, top) + 'px';
+            }
+            function hideTip(){ if (tip) { tip.style.display = 'none'; } }
+
+            document.addEventListener('mouseover', function(e){
+                var t = e.target.closest ? e.target.closest('.veyra-lsyn-tip') : null;
+                if (t) showTip(t);
+            });
+            document.addEventListener('mouseout', function(e){
+                var t = e.target.closest ? e.target.closest('.veyra-lsyn-tip') : null;
+                if (t) hideTip();
+            });
+            document.addEventListener('focusin', function(e){
+                var t = e.target.closest ? e.target.closest('.veyra-lsyn-tip') : null;
+                if (t) showTip(t);
+            });
+            document.addEventListener('focusout', hideTip);
+            window.addEventListener('scroll', hideTip, true);
+
+            // --- Refresh button + progress bar ------------------------------
+            var els = {};
+
+            function buildRefreshUI(){
+                if (document.querySelector('.veyra-lsyn-refresh-wrap')) return true;
+                // Sit to the right of the "Blog pages show at most" controller, which is
+                // itself injected by JS; fall back to the Add Post button if it's absent.
+                var anchor = document.querySelector('.veyra-reading-ctl')
+                          || document.querySelector('.wrap .page-title-action');
+                if (!anchor) return false;
+
+                var wrap = document.createElement('span');
+                wrap.className = 'veyra-lsyn-refresh-wrap';
+                wrap.innerHTML = '<button type="button" class="button veyra-lsyn-refresh">refresh link data for link_synopsis</button>'
+                    + '<span class="veyra-lsyn-lastrun"></span>';
+                anchor.insertAdjacentElement('afterend', wrap);
+
+                var progress = document.createElement('div');
+                progress.className = 'veyra-lsyn-progress';
+                progress.style.display = 'none';
+                progress.innerHTML = '<div class="veyra-lsyn-progress-track"><span class="veyra-lsyn-progress-fill"></span></div>'
+                    + '<div class="veyra-lsyn-progress-text"></div>';
+                var header = document.querySelector('.wrap .wp-header-end') || document.querySelector('.wrap h1');
+                if (header) { header.insertAdjacentElement('afterend', progress); }
+                else { wrap.insertAdjacentElement('afterend', progress); }
+
+                els.button   = wrap.querySelector('.veyra-lsyn-refresh');
+                els.lastrun  = wrap.querySelector('.veyra-lsyn-lastrun');
+                els.progress = progress;
+                els.fill     = progress.querySelector('.veyra-lsyn-progress-fill');
+                els.text     = progress.querySelector('.veyra-lsyn-progress-text');
+
+                els.lastrun.textContent = LAST_RUN;
+                els.button.addEventListener('click', runRefresh);
+                return true;
+            }
+
+            function setProgress(pct, message, state){
+                els.progress.style.display = 'block';
+                els.fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+                els.text.textContent = message;
+                els.text.className = 'veyra-lsyn-progress-text' + (state ? ' is-' + state : '');
+            }
+
+            function runRefresh(){
+                els.button.disabled = true;
+                setProgress(0, 'starting…');
+
+                post('veyra_lsyn_start').then(function(data){
+                    var ids = data.ids || [];
+                    var size = data.batch_size || 25;
+                    var total = ids.length;
+                    if (!total) {
+                        setProgress(100, 'no posts to scan', 'done');
+                        els.button.disabled = false;
+                        return null;
+                    }
+
+                    var batches = [];
+                    for (var i = 0; i < total; i += size) { batches.push(ids.slice(i, i + size)); }
+
+                    var scanned = 0, links = 0;
+                    // Sequential, one batch per request — keeps each request small so a
+                    // large site can't hit the PHP time limit mid-scan.
+                    return batches.reduce(function(chain, batch){
+                        return chain.then(function(){
+                            var pairs = batch.map(function(id){ return ['ids[]', id]; });
+                            return post('veyra_lsyn_scan_batch', pairs).then(function(res){
+                                scanned += res.scanned;
+                                links += res.links;
+                                setProgress(
+                                    (scanned / total) * 100,
+                                    'scanning… ' + scanned + ' / ' + total + ' posts · ' + links + ' outbound links found'
+                                );
+                            });
+                        });
+                    }, Promise.resolve()).then(function(){
+                        return post('veyra_lsyn_finish').then(function(res){
+                            els.lastrun.textContent = res.label || '';
+                            setProgress(100, '✓ done — scanned ' + scanned + ' posts, found ' + links + ' outbound links. reloading…', 'done');
+                            setTimeout(function(){ window.location.reload(); }, 1500);
+                        });
+                    });
+                }).catch(function(err){
+                    setProgress(100, 'failed: ' + err.message, 'error');
+                    els.button.disabled = false;
+                });
+            }
+
+            // The "Blog pages show at most" controller we anchor to is injected by a
+            // separate script on the same hook, so poll briefly for it before falling
+            // back, rather than depending on script execution order.
+            function init(){
+                if (buildRefreshUI()) return;
+                var tries = 0;
+                var timer = setInterval(function(){
+                    if (buildRefreshUI() || ++tries > 40) { clearInterval(timer); }
+                }, 50);
+            }
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', init);
+            } else {
+                init();
+            }
         })();
         </script>
         <?php
