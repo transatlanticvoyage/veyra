@@ -2028,7 +2028,13 @@ class Veyra {
             /* A percentage, not a fixed 360px: the posts list is table-layout:fixed,
                so a pixel width is taken off the top and the Title column absorbs the
                entire loss. A percentage shares the squeeze with the other columns. */
-            .fixed .column-veyra_lsyn { width: 22%; }
+            .fixed .column-veyra_lsyn { width: 20%; }
+            /* Title deliberately gets NO width rule. In a fixed-layout table the space
+               freed by the hidden columns is handed to the column that has no declared
+               width — so Title (and Date, at core's 14%) absorb all of it. Pinning srro
+               and the checkbox stops them soaking up leftover instead of Title. */
+            .fixed .column-veyra_srro { width: 90px; }
+            .fixed .check-column { width: 2.2em; }
             /* Narrow these if they get toggled back on, so Title keeps usable width.
                Core sets author 10%, categories/tags 15%, comments 5.5em. */
             .fixed .column-author { width: 8%; }
