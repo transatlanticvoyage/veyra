@@ -249,6 +249,12 @@ class Veyra {
         $hauser_emblem = isset($_POST['veyra_hauser_themes_header_emblem_text']) ? sanitize_text_field($_POST['veyra_hauser_themes_header_emblem_text']) : '';
         update_option('veyra_hauser_themes_header_emblem_text', $hauser_emblem);
 
+        $cached_fossil_content = isset($_POST['veyra_cached_fossil_content']) ? veyra_clean_fossil_content(wp_kses_post(wp_unslash($_POST['veyra_cached_fossil_content']))) : '';
+        update_option('veyra_cached_fossil_content', $cached_fossil_content);
+
+        $cached_fossil_content_below_feed = isset($_POST['veyra_cached_fossil_content_below_feed']) ? veyra_clean_fossil_content(wp_kses_post(wp_unslash($_POST['veyra_cached_fossil_content_below_feed']))) : '';
+        update_option('veyra_cached_fossil_content_below_feed', $cached_fossil_content_below_feed);
+
         // Save WP native reading options
         if (isset($_POST['show_on_front'])) {
             update_option('show_on_front', sanitize_text_field($_POST['show_on_front']));
@@ -355,6 +361,8 @@ class Veyra {
         $show_fossil_below = get_option('veyra_show_fossil_content_below_feed_on_blog_feed_page', false);
         $fossil_content_below = get_option('veyra_fossil_content_below_feed', '');
         $hauser_emblem = get_option('veyra_hauser_themes_header_emblem_text', '');
+        $cached_fossil_content = get_option('veyra_cached_fossil_content', '');
+        $cached_fossil_content_below_feed = get_option('veyra_cached_fossil_content_below_feed', '');
         $saved = isset($_GET['saved']) ? true : false;
 
         // WP native reading options
@@ -374,9 +382,21 @@ class Veyra {
                 <div class="notice notice-success is-dismissible"><p>Settings saved.</p></div>
             <?php endif; ?>
 
+            <h2 class="nav-tab-wrapper" id="veyra-hub-tabs">
+                <a href="#" class="nav-tab nav-tab-active" data-veyra-tab="main-controls">Main Controls</a>
+                <a href="#" class="nav-tab" data-veyra-tab="historical-cached">Historical Cached
+                    <span class="veyra-tab-badge<?php echo ($cached_fossil_content !== '') ? ' veyra-tab-badge--active' : ''; ?>">content-above</span>
+                    <span class="veyra-tab-badge<?php echo ($cached_fossil_content_below_feed !== '') ? ' veyra-tab-badge--active' : ''; ?>">content-below</span>
+                </a>
+            </h2>
+
             <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
                 <input type="hidden" name="action" value="veyra_save_options" />
                 <?php wp_nonce_field('veyra_save_options', 'veyra_options_nonce'); ?>
+
+                <?php submit_button('Save Settings', 'primary', 'submit', false, array('style' => 'margin:16px 0;')); ?>
+
+                <div class="veyra-tab-panel" data-veyra-panel="main-controls">
 
                 <table class="form-table">
                     <tr>
@@ -541,9 +561,61 @@ class Veyra {
                     </tr>
                 </table>
 
+                </div><!-- /.veyra-tab-panel[main-controls] -->
+
+                <div class="veyra-tab-panel" data-veyra-panel="historical-cached" style="display:none;">
+
+                <table class="form-table">
+                    <tr>
+                        <th scope="row">veyra_cached_fossil_content</th>
+                        <td>
+                            <textarea name="veyra_cached_fossil_content" rows="12" cols="80" class="large-text code"><?php echo esc_textarea($cached_fossil_content); ?></textarea>
+                            <p class="description">Backup storage only &mdash; this field has no frontend implementation on the site. Use it to stash content you want kept somewhere safe.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">veyra_cached_fossil_content_below_feed</th>
+                        <td>
+                            <textarea name="veyra_cached_fossil_content_below_feed" rows="12" cols="80" class="large-text code"><?php echo esc_textarea($cached_fossil_content_below_feed); ?></textarea>
+                            <p class="description">Backup storage only &mdash; this field has no frontend implementation on the site. Use it to stash content you want kept somewhere safe.</p>
+                        </td>
+                    </tr>
+                </table>
+
+                </div><!-- /.veyra-tab-panel[historical-cached] -->
+
                 <?php submit_button('Save Settings'); ?>
             </form>
         </div>
+
+        <style>
+            .veyra-tab-badge{display:inline-block;margin-left:6px;padding:1px 8px;font-size:11px;font-weight:600;line-height:1.6;border-radius:10px;background:#dcdcde;color:#8c8f94;vertical-align:middle;}
+            .veyra-tab-badge--active{background:#2271b1;color:#fff;}
+        </style>
+        <script>
+        (function(){
+            var tabs = document.querySelectorAll('#veyra-hub-tabs .nav-tab');
+            var panels = document.querySelectorAll('.veyra-tab-panel');
+            var STORAGE_KEY = 'veyra_hub_active_tab';
+            function activate(tabKey) {
+                tabs.forEach(function(t){ t.classList.toggle('nav-tab-active', t.getAttribute('data-veyra-tab') === tabKey); });
+                panels.forEach(function(p){ p.style.display = (p.getAttribute('data-veyra-panel') === tabKey) ? '' : 'none'; });
+            }
+            tabs.forEach(function(t){
+                t.addEventListener('click', function(e){
+                    e.preventDefault();
+                    var key = t.getAttribute('data-veyra-tab');
+                    activate(key);
+                    try { localStorage.setItem(STORAGE_KEY, key); } catch (err) {}
+                });
+            });
+            var saved = null;
+            try { saved = localStorage.getItem(STORAGE_KEY); } catch (err) {}
+            if (saved && document.querySelector('#veyra-hub-tabs [data-veyra-tab="' + saved + '"]')) {
+                activate(saved);
+            }
+        })();
+        </script>
         <?php
     }
 
@@ -2893,6 +2965,7 @@ register_activation_hook(__FILE__, array($veyra, 'veyra_sm_create_tables'));
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/post_importer_from_birch/post-importer-from-birch.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/veyra_plugin_manager/veyra-plugin-manager.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/sm-redirect-manager/sm-redirect-manager.php';
+require_once VEYRA_PLUGIN_PATH . 'admin-screens/majestic_data_jar/majestic-data-jar.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/custom_blog_feed/custom-blog-feed.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/page-change-drip-manager/page-change-drip-manager.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/veyra-site-title-and-footer-mar/veyra-site-title-and-footer-mar.php';
