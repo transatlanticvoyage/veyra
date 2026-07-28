@@ -109,6 +109,12 @@ class Veyra {
         add_action('edit_form_after_editor', array($this, 'veyra_wayback_render_editor_box'));
         add_action('save_post', array($this, 'veyra_wayback_save_editor'), 10, 2);
 
+        // Postmeta-backed phase-in versions of the same 4 wayback fields (per-post rows,
+        // not a shared wp_option array — see veyra_postmeta_field_definitions()). Rendered
+        // by the same veyra_wayback_render_editor_box() call above; saved on the same native
+        // save_post hook, no separate save button.
+        add_action('save_post', array($this, 'veyra_postmeta_save_editor'), 10, 2);
+
         add_action('admin_print_styles-post.php', array($this, 'veyra_sm_editor_styles'));
         add_action('admin_print_styles-post-new.php', array($this, 'veyra_sm_editor_styles'));
         add_action('admin_print_footer_scripts', array($this, 'veyra_sm_editor_js'));
@@ -2605,16 +2611,110 @@ class Veyra {
     /** Paste boxes (edit_form_after_editor) below the native content editor: caching a
      *  page's original wayback content, and staging freshly-invented content before it's
      *  deployed into the live post_content. Each is backed by its own wp_option keyed by
-     *  post ID, so each page/post owns exactly one entry per option. */
+     *  post ID, so each page/post owns exactly one entry per option.
+     *
+     *  A postmeta-backed version of the same 4 fields (see veyra_postmeta_field_definitions())
+     *  is rendered above these, between two black phase-labeled separators, while both storage
+     *  paths run in parallel (2026-07-28: wp_options doesn't scale — a single shared option
+     *  holding every post's content on a large site gets unserialized/re-serialized on every
+     *  post save and can blow the PHP memory limit; postmeta is per-post and doesn't have that
+     *  problem). Nothing about this old wp_options path changes. */
     public function veyra_wayback_render_editor_box($post) {
         if (!$post || !in_array($post->post_type, array('post', 'page'), true)) {
             return;
         }
         wp_nonce_field('veyra_wayback_save', 'veyra_wayback_nonce');
+        wp_nonce_field('veyra_postmeta_save', 'veyra_postmeta_nonce');
+
+        $this->veyra_render_phase_separator('New Post Meta Fields Being Phased In');
+        foreach ($this->veyra_postmeta_field_definitions() as $field) {
+            if ($field['type'] === 'text') {
+                $this->veyra_render_postmeta_text_field($post->ID, $field['meta_key']);
+            } else {
+                $this->veyra_render_postmeta_textarea_field($post->ID, $field['meta_key']);
+            }
+        }
+        $this->veyra_render_phase_separator('Old WP Options Fields Being Phased Out');
+
         $this->veyra_render_wayback_title_field($post->ID);
         $this->veyra_render_snap_height_box($post->ID, 'veyra_cached_original_wayback_content');
         $this->veyra_render_freshly_post_title_field($post->ID);
         $this->veyra_render_snap_height_box($post->ID, 'veyra_freshly_invented_content_before_deployment_to_live_post_content');
+    }
+
+    /** Field/type map for the postmeta-backed phase-in boxes: one row per post (unlike
+     *  their wp_options counterparts, which share one big post-ID-keyed array per field). */
+    private function veyra_postmeta_field_definitions() {
+        return array(
+            array('meta_key' => 'vpostmeta_cached_original_wayback_post_title', 'type' => 'text'),
+            array('meta_key' => 'vpostmeta_cached_original_wayback_content', 'type' => 'textarea'),
+            array('meta_key' => 'vpostmeta_freshly_post_title', 'type' => 'text'),
+            array('meta_key' => 'vpostmeta_freshly_invented_content_before_deployment_to_live_post_content', 'type' => 'textarea'),
+        );
+    }
+
+    /** Static 26px black/white divider labeling which group of boxes follows it. */
+    private function veyra_render_phase_separator($text) {
+        echo '<div class="veyra-postmeta-separator">' . esc_html($text) . '</div>';
+    }
+
+    /** Single-line text input for a postmeta-backed field — same markup/classes as the
+     *  wp_options title fields below, but sourced from get_post_meta() (one row per post). */
+    private function veyra_render_postmeta_text_field($post_id, $meta_key) {
+        $value = get_post_meta($post_id, $meta_key, true);
+
+        echo '<div class="veyra-wayback-box veyra-wayback-title-box">';
+        echo '<p class="veyra-wayback-label">wp_postmeta: ' . esc_html($meta_key) . '</p>';
+        echo '<input type="text" class="veyra-sm-input" name="' . esc_attr($meta_key) . '" value="' . esc_attr($value) . '" />';
+        echo '</div>';
+    }
+
+    /** Snap-height labeled textarea for a postmeta-backed field — same markup/classes (and
+     *  therefore the same generic height-snap JS) as veyra_render_snap_height_box(), but
+     *  sourced from get_post_meta() (one row per post, not a shared post-ID-keyed array). */
+    private function veyra_render_postmeta_textarea_field($post_id, $meta_key) {
+        $value = get_post_meta($post_id, $meta_key, true);
+        $textarea_id  = 'veyra-snap-' . str_replace('_', '-', $meta_key);
+        $heightbar_id = $textarea_id . '-heightbar';
+
+        echo '<div class="veyra-wayback-box" id="' . esc_attr($textarea_id) . '-box">';
+        echo '<div class="veyra-wayback-header-row">';
+        echo '<p class="veyra-wayback-label">wp_postmeta: ' . esc_html($meta_key) . '</p>';
+        echo '<div class="veyra-wayback-heightbar" id="' . esc_attr($heightbar_id) . '">';
+        echo '<button type="button" class="button veyra-wayback-height-btn veyra-wayback-height-btn--active" data-h="100">height: 100 px</button>';
+        echo '<span class="veyra-wayback-sep">|</span>';
+        echo '<button type="button" class="button veyra-wayback-height-btn" data-h="300">300 px</button>';
+        echo '<span class="veyra-wayback-sep">|</span>';
+        echo '<button type="button" class="button veyra-wayback-height-btn" data-h="full">100% of contents</button>';
+        echo '</div>';
+        echo '</div>';
+        echo '<textarea id="' . esc_attr($textarea_id) . '" class="veyra-wayback-textarea" name="' . esc_attr($meta_key) . '">' . esc_textarea($value) . '</textarea>';
+        echo '</div>';
+    }
+
+    /** Persist each postmeta-backed phase-in field into its own per-post meta row. Runs off
+     *  the same native save_post hook as veyra_wayback_save_editor (no new save button —
+     *  both simply fire when the existing Publish/Update/Save Draft button is clicked). */
+    public function veyra_postmeta_save_editor($post_id, $post) {
+        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) { return; }
+        if (wp_is_post_revision($post_id)) { return; }
+        if (!isset($_POST['veyra_postmeta_nonce']) || !wp_verify_nonce($_POST['veyra_postmeta_nonce'], 'veyra_postmeta_save')) { return; }
+        if (!current_user_can('edit_post', $post_id)) { return; }
+
+        foreach ($this->veyra_postmeta_field_definitions() as $field) {
+            $meta_key = $field['meta_key'];
+            if (!isset($_POST[$meta_key])) { continue; }
+
+            $value = ($field['type'] === 'text')
+                ? sanitize_text_field(wp_unslash($_POST[$meta_key]))
+                : wp_unslash($_POST[$meta_key]);
+
+            if (trim($value) === '') {
+                delete_post_meta($post_id, $meta_key);
+            } else {
+                update_post_meta($post_id, $meta_key, $value);
+            }
+        }
     }
 
     /** Renders the single-line text input for this post's cached original wayback
@@ -2654,6 +2754,7 @@ class Veyra {
         $heightbar_id = $textarea_id . '-heightbar';
 
         echo '<div class="veyra-wayback-box" id="' . esc_attr($textarea_id) . '-box">';
+        echo '<div class="veyra-wayback-header-row">';
         echo '<p class="veyra-wayback-label">wp_options: ' . esc_html($option_name) . '</p>';
         echo '<div class="veyra-wayback-heightbar" id="' . esc_attr($heightbar_id) . '">';
         echo '<button type="button" class="button veyra-wayback-height-btn veyra-wayback-height-btn--active" data-h="100">height: 100 px</button>';
@@ -2661,6 +2762,7 @@ class Veyra {
         echo '<button type="button" class="button veyra-wayback-height-btn" data-h="300">300 px</button>';
         echo '<span class="veyra-wayback-sep">|</span>';
         echo '<button type="button" class="button veyra-wayback-height-btn" data-h="full">100% of contents</button>';
+        echo '</div>';
         echo '</div>';
         echo '<textarea id="' . esc_attr($textarea_id) . '" class="veyra-wayback-textarea" name="' . esc_attr($option_name) . '">' . esc_textarea($value) . '</textarea>';
         echo '</div>';
@@ -2758,10 +2860,14 @@ class Veyra {
         .veyra-species-note { font-size:12px; color:#b32d2e; font-style:italic; }
         .veyra-wayback-box { border:1px solid #c3c4c7; background:#fff; margin:20px 0 0 0; padding:14px; }
         .veyra-wayback-label { font-weight:700; font-size:14px; margin:0 0 10px; }
-        .veyra-wayback-heightbar { margin:0 0 8px; display:flex; align-items:center; gap:8px; }
+        .veyra-wayback-header-row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 10px; }
+        .veyra-wayback-header-row .veyra-wayback-label { margin:0; }
+        .veyra-wayback-heightbar { margin:0; display:flex; align-items:center; justify-content:flex-end; gap:8px; }
         .veyra-wayback-sep { color:#c3c4c7; }
+        .veyra-wayback-height-btn { padding:0 5px; font-size:9.75px; line-height:1.4; min-height:20px; }
         .veyra-wayback-height-btn--active { background:#2271b1; color:#fff; border-color:#2271b1; }
         .veyra-wayback-textarea { width:100%; box-sizing:border-box; font-family:monospace; font-size:12px; height:100px; overflow-y:auto; resize:none; display:block; }
+        .veyra-postmeta-separator { height:26px; line-height:26px; background:#000; color:#fff; font-weight:700; font-size:13px; padding:0 14px; margin:20px 0 0 0; }
         </style>';
     }
 

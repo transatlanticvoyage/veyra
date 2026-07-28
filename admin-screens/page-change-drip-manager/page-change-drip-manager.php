@@ -51,6 +51,24 @@ function veyra_pcdm_truncate($value) {
     return $value;
 }
 
+/** Truncate a value for the narrow vpm-freshly-title column: first 6 chars + "..". */
+function veyra_pcdm_truncate_narrow($value) {
+    $value = (string) $value;
+    if (strlen($value) > 6) {
+        return substr($value, 0, 6) . '..';
+    }
+    return $value;
+}
+
+/** Truncate a value for the fixed 200px post_title column: first 30 chars + "..". */
+function veyra_pcdm_truncate_title($value) {
+    $value = (string) $value;
+    if (strlen($value) > 30) {
+        return substr($value, 0, 30) . '..';
+    }
+    return $value;
+}
+
 // ---------------------------------------------------------------------------
 // AJAX: save the client-computed veyra_switchover_date assignments.
 // (The randomized drip-interval algorithm runs in JS; this just persists the
@@ -155,10 +173,32 @@ function veyra_pcdm_clear_cron_schedule() {
 
 /**
  * Deploy the switchover for a specific set of post IDs, right now, regardless
- * of what their veyra_switchover_date says: copy
- * veyra_freshly_invented_content_before_deployment_to_live_post_content into
- * post_content, tag veyra_content_subspecies, and mark veyra_switchover_completed.
- * Shared by the WP-Cron due-date sweep and the manual "perform now" action.
+ * of what their veyra_switchover_date says: copy the staged replacement title/
+ * content into post_title/post_content, tag veyra_content_subspecies, and mark
+ * veyra_switchover_completed. Shared by the WP-Cron due-date sweep and the
+ * manual "perform now" action.
+ *
+ * Source priority per post (revised 2026-07-28) — 4 postmeta combinations:
+ *   - both vpostmeta_freshly_post_title and vpostmeta_freshly_invented_..._content
+ *     set: use both (postmeta wins outright).
+ *   - postmeta title BLANK, postmeta content SET: use the postmeta content for
+ *     post_content only; post_title is left untouched (not fallen back to
+ *     the wp_options pair — the postmeta content is trusted on its own).
+ *   - postmeta title SET, postmeta content BLANK: postmeta is not usable as a
+ *     pair here, so fall back entirely to the wp_options pair below.
+ *   - both postmeta fields blank: fall back entirely to the wp_options pair.
+ *
+ * Once falling back to the wp_options pair (veyra_freshly_post_title /
+ * veyra_freshly_invented_content_before_deployment_to_live_post_content), the
+ * original rule applies: content is the gate — if the fallback content is
+ * blank, NOTHING is updated (not even a lone title), regardless of whether a
+ * fallback title exists; if fallback content is present, it's used for
+ * post_content and the fallback title is applied too only when it's also set.
+ *
+ * End guard (holds for every branch above): post_content is only ever passed
+ * to wp_update_post() once confirmed non-blank, and post_title is included in
+ * the update args only when non-blank — so this action can never blank out
+ * either field. veyra_content_species/subspecies tagging below is unchanged.
  */
 function veyra_pcdm_deploy_switchover($post_ids) {
     $result = array('deployed' => 0, 'skipped' => 0);
@@ -196,21 +236,58 @@ function veyra_pcdm_deploy_switchover($post_ids) {
             $result['skipped']++;
             continue;
         }
-        // Nothing staged to deploy.
-        if (!isset($freshly_invented[$post_id]) || trim((string) $freshly_invented[$post_id]) === '') {
+
+        $pm_title       = get_post_meta($post_id, 'vpostmeta_freshly_post_title', true);
+        $pm_content     = get_post_meta($post_id, 'vpostmeta_freshly_invented_content_before_deployment_to_live_post_content', true);
+        $pm_title_set   = trim((string) $pm_title) !== '';
+        $pm_content_set = trim((string) $pm_content) !== '';
+
+        $source_title   = '';
+        $source_content = '';
+        $nothing_to_do   = false;
+
+        if ($pm_title_set && $pm_content_set) {
+            // Both postmeta fields set — postmeta wins outright.
+            $source_title   = $pm_title;
+            $source_content = $pm_content;
+        } elseif (!$pm_title_set && $pm_content_set) {
+            // Postmeta content only — use it, leave post_title untouched.
+            $source_content = $pm_content;
+        } else {
+            // Postmeta title set with no content, or neither set — fall back
+            // to the wp_options pair entirely.
+            $opt_title       = isset($freshly_post_title[$post_id]) ? (string) $freshly_post_title[$post_id] : '';
+            $opt_content     = isset($freshly_invented[$post_id]) ? (string) $freshly_invented[$post_id] : '';
+            $opt_content_set = trim($opt_content) !== '';
+
+            if (!$opt_content_set) {
+                // Fallback content missing (whether or not a fallback title
+                // exists) — nothing safe to deploy; update neither field.
+                $nothing_to_do = true;
+            } else {
+                $source_content = $opt_content;
+                if (trim($opt_title) !== '') {
+                    $source_title = $opt_title;
+                }
+            }
+        }
+
+        // Nothing staged to deploy (from whichever source applies) — end guard:
+        // never proceed to wp_update_post with blank content.
+        if ($nothing_to_do || trim((string) $source_content) === '') {
             $result['skipped']++;
             continue;
         }
 
         // Copy the staged content into post_content, replacing whatever is there.
         // Also apply the staged replacement post_title, but only when one is set —
-        // an empty/missing veyra_freshly_post_title leaves post_title untouched.
+        // an empty staged title leaves post_title untouched.
         $update_args = array(
             'ID'           => $post_id,
-            'post_content' => $freshly_invented[$post_id],
+            'post_content' => $source_content,
         );
-        if (isset($freshly_post_title[$post_id]) && trim((string) $freshly_post_title[$post_id]) !== '') {
-            $update_args['post_title'] = $freshly_post_title[$post_id];
+        if (trim((string) $source_title) !== '') {
+            $update_args['post_title'] = $source_title;
         }
         wp_update_post($update_args);
 
@@ -280,6 +357,88 @@ function veyra_pcdm_ajax_switchover_now() {
     }
 
     $result = veyra_pcdm_deploy_switchover($ids);
+    wp_send_json_success($result);
+}
+
+/**
+ * Deploy the switchover for a specific set of post IDs using ONLY the
+ * postmeta pair (vpostmeta_freshly_post_title /
+ * vpostmeta_freshly_invented_content_before_deployment_to_live_post_content)
+ * — no wp_options fallback at all. Same shape as the original (pre-postmeta)
+ * veyra_pcdm_deploy_switchover() logic: content is the gate (skip the post
+ * entirely if blank), post_title is applied only when non-blank, and
+ * veyra_content_subspecies gets tagged new_freshly_invented_content. Unlike
+ * the wp_options version this does not touch veyra_switchover_completed —
+ * this button is a separate, on-demand action, not part of the scheduled-
+ * switchover completion tracking.
+ */
+function veyra_pcdm_deploy_switchover_postmeta($post_ids) {
+    $result = array('deployed' => 0, 'skipped' => 0);
+    if (!is_array($post_ids) || !$post_ids) {
+        return $result;
+    }
+
+    $subspecies = get_option('veyra_content_subspecies', array());
+    if (!is_array($subspecies)) {
+        $subspecies = array();
+    }
+    $subspecies_changed = false;
+
+    foreach ($post_ids as $post_id) {
+        $post_id = intval($post_id);
+        if ($post_id <= 0) {
+            continue;
+        }
+
+        $title   = get_post_meta($post_id, 'vpostmeta_freshly_post_title', true);
+        $content = get_post_meta($post_id, 'vpostmeta_freshly_invented_content_before_deployment_to_live_post_content', true);
+
+        // Nothing staged to deploy.
+        if (trim((string) $content) === '') {
+            $result['skipped']++;
+            continue;
+        }
+
+        $update_args = array(
+            'ID'           => $post_id,
+            'post_content' => $content,
+        );
+        if (trim((string) $title) !== '') {
+            $update_args['post_title'] = $title;
+        }
+        wp_update_post($update_args);
+
+        $subspecies[$post_id] = 'new_freshly_invented_content';
+        $subspecies_changed   = true;
+
+        $result['deployed']++;
+    }
+
+    if ($subspecies_changed) {
+        update_option('veyra_content_subspecies', $subspecies, false);
+    }
+
+    return $result;
+}
+
+// ---------------------------------------------------------------------------
+// AJAX: "perform content switchover now" (postmeta version) — same shape as
+// veyra_pcdm_ajax_switchover_now() but calls the postmeta-only deploy above.
+// ---------------------------------------------------------------------------
+add_action('wp_ajax_veyra_pcdm_switchover_now_postmeta', 'veyra_pcdm_ajax_switchover_now_postmeta');
+function veyra_pcdm_ajax_switchover_now_postmeta() {
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error('unauthorized', 403);
+    }
+    check_ajax_referer('veyra_pcdm_switchover_now_postmeta', 'nonce');
+
+    $raw = isset($_POST['ids']) ? wp_unslash($_POST['ids']) : '';
+    $ids = json_decode($raw, true);
+    if (!is_array($ids) || !$ids) {
+        wp_send_json_error('no ids provided', 400);
+    }
+
+    $result = veyra_pcdm_deploy_switchover_postmeta($ids);
     wp_send_json_success($result);
 }
 
@@ -357,6 +516,78 @@ function veyra_pcdm_ajax_revert_switchover() {
     wp_send_json_success($result);
 }
 
+/**
+ * Undo a switchover for a specific set of post IDs using ONLY the postmeta
+ * field (vpostmeta_cached_original_wayback_content) — no wp_options fallback.
+ * Same shape as veyra_pcdm_revert_switchover(): copy the cached original back
+ * into post_content (skip if blank), reset veyra_content_subspecies to
+ * actual_copied_historical_content.
+ */
+function veyra_pcdm_revert_switchover_postmeta($post_ids) {
+    $result = array('reverted' => 0, 'skipped' => 0);
+    if (!is_array($post_ids) || !$post_ids) {
+        return $result;
+    }
+
+    $subspecies = get_option('veyra_content_subspecies', array());
+    if (!is_array($subspecies)) {
+        $subspecies = array();
+    }
+    $subspecies_changed = false;
+
+    foreach ($post_ids as $post_id) {
+        $post_id = intval($post_id);
+        if ($post_id <= 0) {
+            continue;
+        }
+
+        $original = get_post_meta($post_id, 'vpostmeta_cached_original_wayback_content', true);
+
+        // Nothing cached to revert to.
+        if (trim((string) $original) === '') {
+            $result['skipped']++;
+            continue;
+        }
+
+        wp_update_post(array(
+            'ID'           => $post_id,
+            'post_content' => $original,
+        ));
+
+        $subspecies[$post_id] = 'actual_copied_historical_content';
+        $subspecies_changed    = true;
+
+        $result['reverted']++;
+    }
+
+    if ($subspecies_changed) {
+        update_option('veyra_content_subspecies', $subspecies, false);
+    }
+
+    return $result;
+}
+
+// ---------------------------------------------------------------------------
+// AJAX: "revert switchover" (postmeta version) — same shape as
+// veyra_pcdm_ajax_revert_switchover() but calls the postmeta-only revert above.
+// ---------------------------------------------------------------------------
+add_action('wp_ajax_veyra_pcdm_revert_switchover_postmeta', 'veyra_pcdm_ajax_revert_switchover_postmeta');
+function veyra_pcdm_ajax_revert_switchover_postmeta() {
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error('unauthorized', 403);
+    }
+    check_ajax_referer('veyra_pcdm_revert_switchover_postmeta', 'nonce');
+
+    $raw = isset($_POST['ids']) ? wp_unslash($_POST['ids']) : '';
+    $ids = json_decode($raw, true);
+    if (!is_array($ids) || !$ids) {
+        wp_send_json_error('no ids provided', 400);
+    }
+
+    $result = veyra_pcdm_revert_switchover_postmeta($ids);
+    wp_send_json_success($result);
+}
+
 function veyra_pcdm_render_page() {
     if (!current_user_can('manage_options')) {
         wp_die('Unauthorized');
@@ -417,10 +648,18 @@ function veyra_pcdm_render_page() {
 
             <div class="veyra-pcdm-now-group">
                 <button type="button" class="button" id="veyra-pcdm-select-past-due">select items with switchover date in past</button>
-                <button type="button" class="button button-primary" id="veyra-pcdm-switchover-now"
-                    data-nonce="<?php echo esc_attr(wp_create_nonce('veyra_pcdm_switchover_now')); ?>">perform content switchover now</button>
-                <button type="button" class="veyra-pcdm-revert-btn" id="veyra-pcdm-revert-switchover"
-                    data-nonce="<?php echo esc_attr(wp_create_nonce('veyra_pcdm_revert_switchover')); ?>">revert switchover</button>
+                <div class="veyra-pcdm-switchover-btn-row">
+                    <button type="button" class="button button-primary" id="veyra-pcdm-switchover-now-postmeta"
+                        data-nonce="<?php echo esc_attr(wp_create_nonce('veyra_pcdm_switchover_now_postmeta')); ?>">perform content switchover now</button>
+                    <button type="button" class="veyra-pcdm-switchover-now-old" id="veyra-pcdm-switchover-now"
+                        data-nonce="<?php echo esc_attr(wp_create_nonce('veyra_pcdm_switchover_now')); ?>">perform content switchover now<br>(old version - uses wp_options)</button>
+                </div>
+                <div class="veyra-pcdm-revert-btn-row">
+                    <button type="button" class="veyra-pcdm-revert-btn" id="veyra-pcdm-revert-switchover-postmeta"
+                        data-nonce="<?php echo esc_attr(wp_create_nonce('veyra_pcdm_revert_switchover_postmeta')); ?>">revert switchover</button>
+                    <button type="button" class="veyra-pcdm-revert-btn-old" id="veyra-pcdm-revert-switchover"
+                        data-nonce="<?php echo esc_attr(wp_create_nonce('veyra_pcdm_revert_switchover')); ?>">revert switchover<br>(old version - uses wp_option)</button>
+                </div>
             </div>
         </div>
 
@@ -431,10 +670,50 @@ function veyra_pcdm_render_page() {
                     <th><strong>post_id</strong></th>
                     <th><strong>post_status</strong></th>
                     <th><strong>post_type</strong></th>
-                    <th><strong>post_title</strong></th>
+                    <th class="veyra-pcdm-col-title"><strong>post_title</strong></th>
                     <th><strong>post_content</strong></th>
-                    <th><strong>tools</strong></th>
-                    <th>
+                    <th class="veyra-pcdm-col-tools"><strong>tools</strong></th>
+                    <th class="veyra-pcdm-col-pm-title veyra-pcdm-col-pm-wayback-title">
+                        <span class="veyra-pcdm-tooltip-wrap" tabindex="0">
+                            <span class="veyra-pcdm-tooltip-icon">&#9432;</span>
+                            <span class="veyra-pcdm-tooltip-popup">
+                                <button type="button" class="button button-small veyra-pcdm-copy" data-copy="vpostmeta_cached_original_wayback_post_title">copy</button>
+                                <code>vpostmeta_cached_original_wayback_post_title</code>
+                            </span>
+                            <strong>vpm-wayback<br>-title</strong>
+                        </span>
+                    </th>
+                    <th class="veyra-pcdm-col-pm-cached-content">
+                        <span class="veyra-pcdm-tooltip-wrap" tabindex="0">
+                            <span class="veyra-pcdm-tooltip-icon">&#9432;</span>
+                            <span class="veyra-pcdm-tooltip-popup">
+                                <button type="button" class="button button-small veyra-pcdm-copy" data-copy="vpostmeta_cached_original_wayback_content">copy</button>
+                                <code>vpostmeta_cached_original_wayback_content</code>
+                            </span>
+                            <strong>vpm-wayback<br>-content</strong>
+                        </span>
+                    </th>
+                    <th class="veyra-pcdm-col-pm-title veyra-pcdm-col-pm-freshly-title">
+                        <span class="veyra-pcdm-tooltip-wrap" tabindex="0">
+                            <span class="veyra-pcdm-tooltip-icon">&#9432;</span>
+                            <span class="veyra-pcdm-tooltip-popup">
+                                <button type="button" class="button button-small veyra-pcdm-copy" data-copy="vpostmeta_freshly_post_title">copy</button>
+                                <code>vpostmeta_freshly_post_title</code>
+                            </span>
+                            <strong>vpm-freshly<br>-title</strong>
+                        </span>
+                    </th>
+                    <th class="veyra-pcdm-col-pm-freshly-content">
+                        <span class="veyra-pcdm-tooltip-wrap" tabindex="0">
+                            <span class="veyra-pcdm-tooltip-icon">&#9432;</span>
+                            <span class="veyra-pcdm-tooltip-popup">
+                                <button type="button" class="button button-small veyra-pcdm-copy" data-copy="vpostmeta_freshly_invented_content_before_deployment_to_live_post_content">copy</button>
+                                <code>vpostmeta_freshly_invented_content_before_deployment_to_live_post_content</code>
+                            </span>
+                            <strong>vpostmeta_freshly_invented...</strong>
+                        </span>
+                    </th>
+                    <th class="veyra-pcdm-col-orig-content">
                         <span class="veyra-pcdm-tooltip-wrap" tabindex="0">
                             <span class="veyra-pcdm-tooltip-icon">&#9432;</span>
                             <span class="veyra-pcdm-tooltip-popup">
@@ -456,17 +735,21 @@ function veyra_pcdm_render_page() {
                     </th>
                     <th class="veyra-pcdm-col-species"><strong>veyra_content_species</strong></th>
                     <th class="veyra-pcdm-col-subspecies"><strong>veyra_content_subspecies</strong></th>
-                    <th><strong>veyra_switchover_date</strong></th>
+                    <th class="veyra-pcdm-col-switchover-date"><strong>veyra_switchover_date</strong></th>
                     <th><strong>veyra_switchover_completed</strong></th>
                 </tr>
             </thead>
             <tbody>
             <?php if (!$posts): ?>
-                <tr><td colspan="13">No posts or pages found.</td></tr>
+                <tr><td colspan="17">No posts or pages found.</td></tr>
             <?php else: foreach ($posts as $p):
                 $id = intval($p->ID);
                 $original_val  = isset($cached_original[$id]) ? $cached_original[$id] : '';
                 $invented_val  = isset($freshly_invented[$id]) ? $freshly_invented[$id] : '';
+                $pm_cached_title_val   = get_post_meta($id, 'vpostmeta_cached_original_wayback_post_title', true);
+                $pm_cached_content_val = get_post_meta($id, 'vpostmeta_cached_original_wayback_content', true);
+                $pm_title_val = get_post_meta($id, 'vpostmeta_freshly_post_title', true);
+                $pm_invented_val = get_post_meta($id, 'vpostmeta_freshly_invented_content_before_deployment_to_live_post_content', true);
                 $species_val   = isset($species[$id]) ? $species[$id] : '';
                 $subspecies_val = isset($subspecies[$id]) ? $subspecies[$id] : '';
                 $switchover_raw = isset($switchover_date[$id]) ? $switchover_date[$id] : '';
@@ -476,6 +759,24 @@ function veyra_pcdm_render_page() {
                 $completed_val = isset($switchover_completed[$id]) ? $switchover_completed[$id] : '';
                 $invented_empty = (trim((string) $invented_val) === '') ? '1' : '0';
                 $switchover_ts = (is_numeric($switchover_raw) && intval($switchover_raw) > 0) ? intval($switchover_raw) : '';
+
+                // post_title/post_content match highlighting: same colors/classes as the
+                // wayback (blue) and freshly (green) postmeta columns' own has-value
+                // highlight — reused here so "same bg color" means literally the same CSS.
+                // Wayback match takes priority over freshly match, per instructions; no
+                // match at all leaves the cell's existing styling untouched.
+                $title_match_class = '';
+                if (trim((string) $pm_cached_title_val) !== '' && $p->post_title === $pm_cached_title_val) {
+                    $title_match_class = ' veyra-pcdm-col-pm-wayback-has-value';
+                } elseif (trim((string) $pm_title_val) !== '' && $p->post_title === $pm_title_val) {
+                    $title_match_class = ' veyra-pcdm-col-pm-freshly-has-value';
+                }
+                $content_match_class = '';
+                if (trim((string) $pm_cached_content_val) !== '' && $p->post_content === $pm_cached_content_val) {
+                    $content_match_class = ' veyra-pcdm-col-pm-wayback-has-value';
+                } elseif (trim((string) $pm_invented_val) !== '' && $p->post_content === $pm_invented_val) {
+                    $content_match_class = ' veyra-pcdm-col-pm-freshly-has-value';
+                }
             ?>
                 <tr>
                     <td class="check-column">
@@ -488,17 +789,21 @@ function veyra_pcdm_render_page() {
                     <td><?php echo $id; ?></td>
                     <td><?php echo esc_html($p->post_status); ?></td>
                     <td><?php echo esc_html($p->post_type); ?></td>
-                    <td class="veyra-pcdm-col-title" title="<?php echo esc_attr($p->post_title); ?>"><?php echo esc_html($p->post_title); ?></td>
-                    <td><?php echo esc_html(veyra_pcdm_truncate($p->post_content)); ?></td>
+                    <td class="veyra-pcdm-col-title<?php echo $title_match_class; ?>" title="<?php echo esc_attr($p->post_title); ?>"><?php echo esc_html(veyra_pcdm_truncate_title($p->post_title)); ?></td>
+                    <td class="<?php echo esc_attr(ltrim($content_match_class)); ?>"><?php echo esc_html(veyra_pcdm_truncate($p->post_content)); ?></td>
                     <td class="veyra-pcdm-col-tools">
                         <a class="button button-small" href="<?php echo esc_url(get_edit_post_link($id, 'raw')); ?>" target="_blank" rel="noopener">edit</a>
                         <a class="button button-small" href="<?php echo esc_url(get_permalink($id)); ?>" target="_blank" rel="noopener">FE</a>
                     </td>
-                    <td><?php echo esc_html(veyra_pcdm_truncate($original_val)); ?></td>
+                    <td class="veyra-pcdm-col-pm-title<?php echo (trim((string) $pm_cached_title_val) !== '') ? ' veyra-pcdm-col-pm-wayback-has-value' : ''; ?>" title="<?php echo esc_attr($pm_cached_title_val); ?>"><?php echo esc_html(veyra_pcdm_truncate_narrow($pm_cached_title_val)); ?></td>
+                    <td class="veyra-pcdm-col-pm-cached-content<?php echo (trim((string) $pm_cached_content_val) !== '') ? ' veyra-pcdm-col-pm-wayback-has-value' : ''; ?>"><?php echo esc_html(veyra_pcdm_truncate($pm_cached_content_val)); ?></td>
+                    <td class="veyra-pcdm-col-pm-title<?php echo (trim((string) $pm_title_val) !== '') ? ' veyra-pcdm-col-pm-freshly-has-value' : ''; ?>" title="<?php echo esc_attr($pm_title_val); ?>"><?php echo esc_html(veyra_pcdm_truncate_narrow($pm_title_val)); ?></td>
+                    <td class="<?php echo (trim((string) $pm_invented_val) !== '') ? 'veyra-pcdm-col-pm-freshly-has-value' : ''; ?>"><?php echo esc_html(veyra_pcdm_truncate($pm_invented_val)); ?></td>
+                    <td class="veyra-pcdm-col-orig-content"><?php echo esc_html(veyra_pcdm_truncate($original_val)); ?></td>
                     <td><?php echo esc_html(veyra_pcdm_truncate($invented_val)); ?></td>
                     <td class="veyra-pcdm-col-species"><?php echo esc_html($species_val); ?></td>
                     <td class="veyra-pcdm-col-subspecies"><?php echo esc_html($subspecies_val); ?></td>
-                    <td><?php echo esc_html($switchover_val); ?></td>
+                    <td class="<?php echo ($switchover_val !== '') ? 'veyra-pcdm-col-switchover-date-has-value' : ''; ?>"><?php echo esc_html($switchover_val); ?></td>
                     <td><?php echo esc_html($completed_val); ?></td>
                 </tr>
             <?php endforeach; endif; ?>
@@ -519,6 +824,24 @@ function veyra_pcdm_render_page() {
                 <div class="veyra-pcdm-modal-actions">
                     <button type="button" class="veyra-pcdm-modal-btn veyra-pcdm-modal-cancel" id="veyra-pcdm-modal-cancel">Cancel</button>
                     <button type="button" class="veyra-pcdm-modal-btn veyra-pcdm-modal-confirm" id="veyra-pcdm-modal-confirm">Yes, perform switchover now</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="veyra-pcdm-modal-overlay-postmeta" class="veyra-pcdm-modal-overlay">
+            <div class="veyra-pcdm-modal-box">
+                <h2>Perform content switchover now?</h2>
+                <p>
+                    This will immediately, for every selected item: copy
+                    <code>vpostmeta_freshly_post_title</code> into <code>post_title</code>, copy
+                    <code>vpostmeta_freshly_invented_content_before_deployment_to_live_post_content</code>
+                    into <code>post_content</code> (erasing what's currently there), and set
+                    <code>veyra_content_subspecies</code> to <code>new_freshly_invented_content</code>.
+                </p>
+                <p class="veyra-pcdm-modal-warning">This cannot be undone from this screen.</p>
+                <div class="veyra-pcdm-modal-actions">
+                    <button type="button" class="veyra-pcdm-modal-btn veyra-pcdm-modal-cancel" id="veyra-pcdm-modal-cancel-postmeta">Cancel</button>
+                    <button type="button" class="veyra-pcdm-modal-btn veyra-pcdm-modal-confirm" id="veyra-pcdm-modal-confirm-postmeta">Yes, perform switchover now</button>
                 </div>
             </div>
         </div>
@@ -580,10 +903,42 @@ function veyra_pcdm_render_page() {
             font-size: 13px;
             cursor: pointer;
         }
+        .veyra-pcdm-switchover-btn-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .veyra-pcdm-switchover-now-old {
+            background: #3c434a;
+            color: #fff;
+            border: 1px solid #3c434a;
+            border-radius: 3px;
+            padding: 4px 10px;
+            line-height: 1.3;
+            font-size: 11px;
+            text-align: center;
+            cursor: pointer;
+        }
         .veyra-pcdm-revert-btn:hover {
             background: #6b0000;
             border-color: #6b0000;
             color: #fff;
+        }
+        .veyra-pcdm-revert-btn-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .veyra-pcdm-revert-btn-old {
+            background: #3c434a;
+            color: #fff;
+            border: 1px solid #3c434a;
+            border-radius: 3px;
+            padding: 4px 10px;
+            line-height: 1.3;
+            font-size: 11px;
+            text-align: center;
+            cursor: pointer;
         }
         .veyra-pcdm-modal-overlay {
             display: none;
@@ -667,17 +1022,61 @@ function veyra_pcdm_render_page() {
             white-space: nowrap;
             background: #fff !important;
         }
+        .veyra-pcdm-table th.veyra-pcdm-col-pm-title,
+        .veyra-pcdm-table td.veyra-pcdm-col-pm-title {
+            width: 112px !important;
+            max-width: 112px !important;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .veyra-pcdm-table .veyra-pcdm-col-tools {
+            border-left: 2px solid #000 !important;
+            border-right: 2px solid #000 !important;
+        }
+        .veyra-pcdm-table th.veyra-pcdm-col-pm-freshly-title,
+        .veyra-pcdm-table th.veyra-pcdm-col-pm-freshly-content {
+            background: #d9f2d9 !important;
+        }
+        .veyra-pcdm-table td.veyra-pcdm-col-pm-freshly-has-value {
+            background: #d9f2d9 !important;
+        }
+        .veyra-pcdm-table th.veyra-pcdm-col-pm-wayback-title,
+        .veyra-pcdm-table th.veyra-pcdm-col-pm-cached-content {
+            background: #d6e9fb !important;
+        }
+        .veyra-pcdm-table td.veyra-pcdm-col-pm-wayback-has-value {
+            background: #d6e9fb !important;
+        }
+        .veyra-pcdm-table .veyra-pcdm-col-pm-cached-content {
+            border-right: 2px solid #000 !important;
+        }
+        .veyra-pcdm-table .veyra-pcdm-col-orig-content {
+            border-left: 2px solid #000 !important;
+        }
         .veyra-pcdm-table .veyra-pcdm-col-species {
             border-left: 2px solid #000 !important;
         }
         .veyra-pcdm-table .veyra-pcdm-col-subspecies {
             border-right: 2px solid #000 !important;
         }
-        .veyra-pcdm-col-title {
-            max-width: 470px;
+        .veyra-pcdm-table th.veyra-pcdm-col-species,
+        .veyra-pcdm-table th.veyra-pcdm-col-subspecies {
+            background: #fbe4e9 !important;
+        }
+        .veyra-pcdm-table th.veyra-pcdm-col-switchover-date {
+            background: #fff8c4 !important;
+        }
+        .veyra-pcdm-table td.veyra-pcdm-col-switchover-date-has-value {
+            background: #fff8c4 !important;
+        }
+        .veyra-pcdm-table th.veyra-pcdm-col-title,
+        .veyra-pcdm-table td.veyra-pcdm-col-title {
+            width: 200px !important;
+            max-width: 200px !important;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+            border-left: 2px solid #000 !important;
         }
         .veyra-pcdm-col-tools .button {
             margin-right: 4px;
@@ -978,7 +1377,7 @@ function veyra_pcdm_render_page() {
                 closeModal();
 
                 switchoverNowBtn.disabled = true;
-                var origText = switchoverNowBtn.textContent;
+                var origHtml = switchoverNowBtn.innerHTML;
                 switchoverNowBtn.textContent = 'performing switchover...';
 
                 var body = new URLSearchParams();
@@ -994,13 +1393,83 @@ function veyra_pcdm_render_page() {
                         } else {
                             alert('Failed to perform switchover.');
                             switchoverNowBtn.disabled = false;
-                            switchoverNowBtn.textContent = origText;
+                            switchoverNowBtn.innerHTML = origHtml;
                         }
                     })
                     .catch(function(){
                         alert('Failed to perform switchover.');
                         switchoverNowBtn.disabled = false;
-                        switchoverNowBtn.textContent = origText;
+                        switchoverNowBtn.innerHTML = origHtml;
+                    });
+            });
+        }
+
+        // "perform content switchover now" (postmeta version) — same modal-
+        // confirm flow as the wp_options version above, mirrored 1:1 against
+        // a separate modal + AJAX action (veyra_pcdm_switchover_now_postmeta).
+        var switchoverNowPmBtn   = document.getElementById('veyra-pcdm-switchover-now-postmeta');
+        var modalOverlayPm       = document.getElementById('veyra-pcdm-modal-overlay-postmeta');
+        var modalCancelPmBtn     = document.getElementById('veyra-pcdm-modal-cancel-postmeta');
+        var modalConfirmPmBtn    = document.getElementById('veyra-pcdm-modal-confirm-postmeta');
+        var pendingSwitchoverPmIds = null;
+
+        function closeModalPm(){
+            if (modalOverlayPm) { modalOverlayPm.classList.remove('veyra-pcdm-modal-open'); }
+            pendingSwitchoverPmIds = null;
+        }
+
+        if (switchoverNowPmBtn && modalOverlayPm) {
+            switchoverNowPmBtn.addEventListener('click', function(){
+                var selected = Array.prototype.slice.call(rowCbs()).filter(function(c){ return c.checked; });
+                if (selected.length === 0) {
+                    alert('No items selected. Tick the checkboxes for the items you want to switch over now.');
+                    return;
+                }
+                pendingSwitchoverPmIds = selected.map(function(c){ return c.value; });
+                modalOverlayPm.classList.add('veyra-pcdm-modal-open');
+            });
+        }
+        if (modalCancelPmBtn) {
+            modalCancelPmBtn.addEventListener('click', closeModalPm);
+        }
+        if (modalOverlayPm) {
+            modalOverlayPm.addEventListener('click', function(e){
+                if (e.target === modalOverlayPm) { closeModalPm(); }
+            });
+        }
+        if (modalConfirmPmBtn) {
+            modalConfirmPmBtn.addEventListener('click', function(){
+                if (!pendingSwitchoverPmIds || !pendingSwitchoverPmIds.length) {
+                    closeModalPm();
+                    return;
+                }
+                var ids = pendingSwitchoverPmIds;
+                closeModalPm();
+
+                switchoverNowPmBtn.disabled = true;
+                var origText = switchoverNowPmBtn.textContent;
+                switchoverNowPmBtn.textContent = 'performing switchover...';
+
+                var body = new URLSearchParams();
+                body.set('action', 'veyra_pcdm_switchover_now_postmeta');
+                body.set('nonce', switchoverNowPmBtn.getAttribute('data-nonce') || '');
+                body.set('ids', JSON.stringify(ids));
+
+                fetch(ajaxurl, { method: 'POST', credentials: 'same-origin', body: body })
+                    .then(function(r){ return r.json(); })
+                    .then(function(resp){
+                        if (resp && resp.success) {
+                            location.reload();
+                        } else {
+                            alert('Failed to perform switchover.');
+                            switchoverNowPmBtn.disabled = false;
+                            switchoverNowPmBtn.textContent = origText;
+                        }
+                    })
+                    .catch(function(){
+                        alert('Failed to perform switchover.');
+                        switchoverNowPmBtn.disabled = false;
+                        switchoverNowPmBtn.textContent = origText;
                     });
             });
         }
@@ -1019,7 +1488,7 @@ function veyra_pcdm_render_page() {
                 var ids = selected.map(function(c){ return c.value; });
 
                 revertBtn.disabled = true;
-                var origText = revertBtn.textContent;
+                var origHtml = revertBtn.innerHTML;
                 revertBtn.textContent = 'reverting...';
 
                 var body = new URLSearchParams();
@@ -1035,13 +1504,53 @@ function veyra_pcdm_render_page() {
                         } else {
                             alert('Failed to revert switchover.');
                             revertBtn.disabled = false;
-                            revertBtn.textContent = origText;
+                            revertBtn.innerHTML = origHtml;
                         }
                     })
                     .catch(function(){
                         alert('Failed to revert switchover.');
                         revertBtn.disabled = false;
-                        revertBtn.textContent = origText;
+                        revertBtn.innerHTML = origHtml;
+                    });
+            });
+        }
+
+        // "revert switchover" (postmeta version) — same shape as the
+        // wp_options version above, hits veyra_pcdm_revert_switchover_postmeta.
+        var revertPmBtn = document.getElementById('veyra-pcdm-revert-switchover-postmeta');
+        if (revertPmBtn) {
+            revertPmBtn.addEventListener('click', function(){
+                var selected = Array.prototype.slice.call(rowCbs()).filter(function(c){ return c.checked; });
+                if (selected.length === 0) {
+                    alert('No items selected. Tick the checkboxes for the items you want to revert.');
+                    return;
+                }
+                var ids = selected.map(function(c){ return c.value; });
+
+                revertPmBtn.disabled = true;
+                var origText = revertPmBtn.textContent;
+                revertPmBtn.textContent = 'reverting...';
+
+                var body = new URLSearchParams();
+                body.set('action', 'veyra_pcdm_revert_switchover_postmeta');
+                body.set('nonce', revertPmBtn.getAttribute('data-nonce') || '');
+                body.set('ids', JSON.stringify(ids));
+
+                fetch(ajaxurl, { method: 'POST', credentials: 'same-origin', body: body })
+                    .then(function(r){ return r.json(); })
+                    .then(function(resp){
+                        if (resp && resp.success) {
+                            location.reload();
+                        } else {
+                            alert('Failed to revert switchover.');
+                            revertPmBtn.disabled = false;
+                            revertPmBtn.textContent = origText;
+                        }
+                    })
+                    .catch(function(){
+                        alert('Failed to revert switchover.');
+                        revertPmBtn.disabled = false;
+                        revertPmBtn.textContent = origText;
                     });
             });
         }
