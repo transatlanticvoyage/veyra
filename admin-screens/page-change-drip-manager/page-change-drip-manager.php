@@ -42,11 +42,14 @@ function veyra_pcdm_suppress_notices() {
         . '#wpbody-content .notice-info,#wpbody-content .notice-success{display:none !important;}</style>';
 }
 
-/** Truncate a value for compact table display: first 10 chars + "...". */
+/** Truncate a value for compact table display: first 10 chars + "...".
+ *  Uses mb_* (not strlen/substr) so multibyte UTF-8 strings (e.g. Cyrillic)
+ *  aren't cut mid-character — a byte-based cut here can produce an invalid
+ *  UTF-8 sequence that esc_html() then renders as a blank cell. */
 function veyra_pcdm_truncate($value) {
     $value = (string) $value;
-    if (strlen($value) > 10) {
-        return substr($value, 0, 10) . '...';
+    if (mb_strlen($value, 'UTF-8') > 10) {
+        return mb_substr($value, 0, 10, 'UTF-8') . '...';
     }
     return $value;
 }
@@ -54,8 +57,8 @@ function veyra_pcdm_truncate($value) {
 /** Truncate a value for the narrow vpm-freshly-title column: first 6 chars + "..". */
 function veyra_pcdm_truncate_narrow($value) {
     $value = (string) $value;
-    if (strlen($value) > 6) {
-        return substr($value, 0, 6) . '..';
+    if (mb_strlen($value, 'UTF-8') > 6) {
+        return mb_substr($value, 0, 6, 'UTF-8') . '..';
     }
     return $value;
 }
@@ -63,8 +66,8 @@ function veyra_pcdm_truncate_narrow($value) {
 /** Truncate a value for the fixed 200px post_title column: first 30 chars + "..". */
 function veyra_pcdm_truncate_title($value) {
     $value = (string) $value;
-    if (strlen($value) > 30) {
-        return substr($value, 0, 30) . '..';
+    if (mb_strlen($value, 'UTF-8') > 30) {
+        return mb_substr($value, 0, 30, 'UTF-8') . '..';
     }
     return $value;
 }
@@ -1091,7 +1094,7 @@ function veyra_pcdm_render_page() {
                             this selects all items where:<br>
                             veyra_content_species = content_direct_from_wayback<br>
                             veyra_content_subspecies = actual_copied_historical_content<br>
-                            veyra_freshly_invented_content_before_deployment_to_live_post_content = NOT NULL/EMPTY
+                            vpostmeta_freshly_invented_content_before_deployment_to_live_post_content = NOT NULL/EMPTY
                         </span>
                     </span>
                     <button type="button" class="button" id="veyra-pcdm-select-drip-candidates">select all items that likely need drip changes</button>
@@ -1303,7 +1306,7 @@ function veyra_pcdm_render_page() {
                     ? date('Y-m-d H:i:s', intval($switchover_raw))
                     : '';
                 $completed_val = isset($switchover_completed[$id]) ? $switchover_completed[$id] : '';
-                $invented_empty = (trim((string) $invented_val) === '') ? '1' : '0';
+                $invented_empty = (trim((string) $pm_invented_val) === '') ? '1' : '0';
                 $switchover_ts = (is_numeric($switchover_raw) && intval($switchover_raw) > 0) ? intval($switchover_raw) : '';
 
                 // post_title/post_content match highlighting: same colors/classes as the

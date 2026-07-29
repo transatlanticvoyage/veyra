@@ -223,7 +223,7 @@ class Veyra {
             'edit_posts',
             'veyra-hub-1',
             array($this, 'render_hub_page'),
-            'dashicons-sun',
+            'dashicons-networking',
             21
         );
     }
