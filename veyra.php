@@ -2627,12 +2627,15 @@ class Veyra {
         wp_nonce_field('veyra_postmeta_save', 'veyra_postmeta_nonce');
 
         $this->veyra_render_phase_separator('New Post Meta Fields Being Phased In');
+        $prev_pair = null;
         foreach ($this->veyra_postmeta_field_definitions() as $field) {
+            $is_second_in_pair = ($prev_pair === $field['pair']);
             if ($field['type'] === 'text') {
-                $this->veyra_render_postmeta_text_field($post->ID, $field['meta_key']);
+                $this->veyra_render_postmeta_text_field($post->ID, $field['meta_key'], $field['pair'], $is_second_in_pair);
             } else {
-                $this->veyra_render_postmeta_textarea_field($post->ID, $field['meta_key']);
+                $this->veyra_render_postmeta_textarea_field($post->ID, $field['meta_key'], $field['pair'], $is_second_in_pair);
             }
+            $prev_pair = $field['pair'];
         }
         $this->veyra_render_phase_separator('Old WP Options Fields Being Phased Out');
 
@@ -2642,14 +2645,17 @@ class Veyra {
         $this->veyra_render_snap_height_box($post->ID, 'veyra_freshly_invented_content_before_deployment_to_live_post_content');
     }
 
-    /** Field/type map for the postmeta-backed phase-in boxes: one row per post (unlike
-     *  their wp_options counterparts, which share one big post-ID-keyed array per field). */
+    /** Field/type/pair map for the postmeta-backed phase-in boxes: one row per post (unlike
+     *  their wp_options counterparts, which share one big post-ID-keyed array per field).
+     *  'pair' groups each field with its title/content sibling — used to color each pair
+     *  (blue for wayback, green for freshly) and to collapse the vertical gap between a
+     *  pair's own two boxes (2026-07-28: freshly ordered first per current layout). */
     private function veyra_postmeta_field_definitions() {
         return array(
-            array('meta_key' => 'vpostmeta_cached_original_wayback_post_title', 'type' => 'text'),
-            array('meta_key' => 'vpostmeta_cached_original_wayback_content', 'type' => 'textarea'),
-            array('meta_key' => 'vpostmeta_freshly_post_title', 'type' => 'text'),
-            array('meta_key' => 'vpostmeta_freshly_invented_content_before_deployment_to_live_post_content', 'type' => 'textarea'),
+            array('meta_key' => 'vpostmeta_freshly_post_title', 'type' => 'text', 'pair' => 'freshly'),
+            array('meta_key' => 'vpostmeta_freshly_invented_content_before_deployment_to_live_post_content', 'type' => 'textarea', 'pair' => 'freshly'),
+            array('meta_key' => 'vpostmeta_cached_original_wayback_post_title', 'type' => 'text', 'pair' => 'wayback'),
+            array('meta_key' => 'vpostmeta_cached_original_wayback_content', 'type' => 'textarea', 'pair' => 'wayback'),
         );
     }
 
@@ -2659,11 +2665,16 @@ class Veyra {
     }
 
     /** Single-line text input for a postmeta-backed field — same markup/classes as the
-     *  wp_options title fields below, but sourced from get_post_meta() (one row per post). */
-    private function veyra_render_postmeta_text_field($post_id, $meta_key) {
+     *  wp_options title fields below, but sourced from get_post_meta() (one row per post).
+     *  $pair colors the box (blue=wayback, green=freshly, matching Page Change Drip
+     *  Manager's own colors); $is_second_in_pair zeroes the box's top margin so a pair's
+     *  title+content boxes sit flush against each other with no gap. */
+    private function veyra_render_postmeta_text_field($post_id, $meta_key, $pair, $is_second_in_pair) {
         $value = get_post_meta($post_id, $meta_key, true);
+        $classes = 'veyra-wayback-box veyra-wayback-title-box veyra-postmeta-pair-' . esc_attr($pair);
+        if ($is_second_in_pair) { $classes .= ' veyra-postmeta-pair-second'; }
 
-        echo '<div class="veyra-wayback-box veyra-wayback-title-box">';
+        echo '<div class="' . $classes . '">';
         echo '<p class="veyra-wayback-label">wp_postmeta: ' . esc_html($meta_key) . '</p>';
         echo '<input type="text" class="veyra-sm-input" name="' . esc_attr($meta_key) . '" value="' . esc_attr($value) . '" />';
         echo '</div>';
@@ -2671,13 +2682,16 @@ class Veyra {
 
     /** Snap-height labeled textarea for a postmeta-backed field — same markup/classes (and
      *  therefore the same generic height-snap JS) as veyra_render_snap_height_box(), but
-     *  sourced from get_post_meta() (one row per post, not a shared post-ID-keyed array). */
-    private function veyra_render_postmeta_textarea_field($post_id, $meta_key) {
+     *  sourced from get_post_meta() (one row per post, not a shared post-ID-keyed array).
+     *  $pair/$is_second_in_pair behave exactly as in veyra_render_postmeta_text_field(). */
+    private function veyra_render_postmeta_textarea_field($post_id, $meta_key, $pair, $is_second_in_pair) {
         $value = get_post_meta($post_id, $meta_key, true);
         $textarea_id  = 'veyra-snap-' . str_replace('_', '-', $meta_key);
         $heightbar_id = $textarea_id . '-heightbar';
+        $classes = 'veyra-wayback-box veyra-postmeta-pair-' . esc_attr($pair);
+        if ($is_second_in_pair) { $classes .= ' veyra-postmeta-pair-second'; }
 
-        echo '<div class="veyra-wayback-box" id="' . esc_attr($textarea_id) . '-box">';
+        echo '<div class="' . $classes . '" id="' . esc_attr($textarea_id) . '-box">';
         echo '<div class="veyra-wayback-header-row">';
         echo '<p class="veyra-wayback-label">wp_postmeta: ' . esc_html($meta_key) . '</p>';
         echo '<div class="veyra-wayback-heightbar" id="' . esc_attr($heightbar_id) . '">';
@@ -2837,7 +2851,7 @@ class Veyra {
         .veyra-sm-table__name { font-weight:700; font-size:16px; font-style:normal; margin-bottom:10px; }
         .veyra-sm-row { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px,1fr)); gap:10px 18px; margin-bottom:8px; padding-bottom:8px; border-bottom:1px dashed #e0e0e0; }
         .veyra-sm-field label { display:block; font-weight:700; font-size:16px; font-style:normal; margin-bottom:3px; }
-        .veyra-sm-input { width:100%; }
+        .veyra-sm-input { width:100%; background:#fff; }
         .veyra-sm-ro { background:#f0f0f1; color:#646970; }
         .veyra-sm-linkrow { display:flex; gap:4px; align-items:center; }
         .veyra-sm-linkrow .veyra-sm-input { flex:1; }
@@ -2859,6 +2873,9 @@ class Veyra {
         .veyra-species-pill-desc { font-size:11px; color:#646970; font-style:italic; max-width:240px; line-height:1.3; }
         .veyra-species-note { font-size:12px; color:#b32d2e; font-style:italic; }
         .veyra-wayback-box { border:1px solid #c3c4c7; background:#fff; margin:20px 0 0 0; padding:14px; }
+        .veyra-postmeta-pair-wayback { background:#d6e9fb; }
+        .veyra-postmeta-pair-freshly { background:#d9f2d9; }
+        .veyra-postmeta-pair-second { margin-top:0; }
         .veyra-wayback-label { font-weight:700; font-size:14px; margin:0 0 10px; }
         .veyra-wayback-header-row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 10px; }
         .veyra-wayback-header-row .veyra-wayback-label { margin:0; }
@@ -2866,7 +2883,7 @@ class Veyra {
         .veyra-wayback-sep { color:#c3c4c7; }
         .veyra-wayback-height-btn { padding:0 5px; font-size:9.75px; line-height:1.4; min-height:20px; }
         .veyra-wayback-height-btn--active { background:#2271b1; color:#fff; border-color:#2271b1; }
-        .veyra-wayback-textarea { width:100%; box-sizing:border-box; font-family:monospace; font-size:12px; height:100px; overflow-y:auto; resize:none; display:block; }
+        .veyra-wayback-textarea { width:100%; box-sizing:border-box; font-family:monospace; font-size:12px; height:100px; overflow-y:auto; resize:none; display:block; background:#fff; }
         .veyra-postmeta-separator { height:26px; line-height:26px; background:#000; color:#fff; font-weight:700; font-size:13px; padding:0 14px; margin:20px 0 0 0; }
         </style>';
     }
