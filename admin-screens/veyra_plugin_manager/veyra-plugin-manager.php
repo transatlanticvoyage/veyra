@@ -323,6 +323,23 @@ function veyra_plugin_manager_render_page() {
             </tbody>
         </table>
 
+        <div style="margin-top: 24px; padding: 16px; background: #fff; border: 1px solid #c3c4c7; border-radius: 6px; max-width: 640px;">
+            <h2 style="margin: 0 0 6px 0; font-size: 14px;">Sitemap Shortcode</h2>
+            <p style="color: #666; margin: 0 0 10px 0; font-size: 13px;">
+                Drop this shortcode into any page or post to render a linebreak-separated list of links to every published page on the site (posts are not included), with a "Home" link listed first.
+            </p>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <input type="text" readonly id="veyra-sitemap-shortcode-field"
+                       value="[veyra_sitemap_render_all_published_pages]"
+                       onclick="this.select();"
+                       style="flex: 1; font-family: monospace; font-size: 13px; padding: 8px; border: 1px solid #8c8f94; border-radius: 4px; background: #f6f7f7;">
+                <button type="button" id="veyra-sitemap-shortcode-copy"
+                        style="padding: 8px 12px; font-size: 13px; border: 1px solid #2271b1; border-radius: 4px; background: #2271b1; color: #fff; cursor: pointer;">
+                    Copy
+                </button>
+            </div>
+        </div>
+
         <style>
             .status-badge { padding: 4px 8px; border-radius: 3px; font-size: 12px; font-weight: bold; }
             .status-badge.active { background: #d1e7dd; color: #0f5132; }
@@ -337,6 +354,19 @@ function veyra_plugin_manager_render_page() {
 
     <script>
     jQuery(document).ready(function($) {
+        $('#veyra-sitemap-shortcode-copy').on('click', function() {
+            const $field = $('#veyra-sitemap-shortcode-field');
+            const $btn = $(this);
+            $field.get(0).select();
+            navigator.clipboard.writeText($field.val()).then(function() {
+                const original = $btn.text();
+                $btn.text('Copied!');
+                setTimeout(function() { $btn.text(original); }, 1500);
+            }).catch(function() {
+                document.execCommand('copy');
+            });
+        });
+
         $('.plugin-action-btn').on('click', function() {
             const $button = $(this);
             const plugin = $button.data('plugin');

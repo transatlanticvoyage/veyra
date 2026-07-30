@@ -168,6 +168,9 @@ class Veyra {
             add_shortcode('veyra_content', array($this, 'veyra_content_shortcode'));
             add_filter('the_content', array($this, 'process_veyra_codes_in_content'), 10);
         }
+
+        // Sitemap-style link list; independent of Elementor fallback mode.
+        add_shortcode('veyra_sitemap_render_all_published_pages', array($this, 'veyra_sitemap_render_all_published_pages_shortcode'));
     }
     
     /**
@@ -191,6 +194,35 @@ class Veyra {
         return !empty($content) ? $content : $atts['default'];
     }
     
+    /**
+     * Shortcode that renders a linebreak-separated list of links to every
+     * published page on the site (post_type 'page' only — posts are excluded),
+     * with the homepage listed first under the anchor text "Home".
+     *
+     * Usage: [veyra_sitemap_render_all_published_pages]
+     */
+    public function veyra_sitemap_render_all_published_pages_shortcode($atts) {
+        $links = array();
+
+        // Homepage always comes first, regardless of whether the front page
+        // is a static WP page or the native posts/blog feed.
+        $links[] = '<a href="' . esc_url(home_url('/')) . '">' . esc_html__('Home', 'veyra') . '</a>';
+
+        $pages = get_posts(array(
+            'post_type'      => 'page',
+            'post_status'    => 'publish',
+            'numberposts'    => -1,
+            'orderby'        => 'title',
+            'order'          => 'ASC',
+        ));
+
+        foreach ($pages as $page) {
+            $links[] = '<a href="' . esc_url(get_permalink($page->ID)) . '">' . esc_html(get_the_title($page)) . '</a>';
+        }
+
+        return implode('<br>' . "\n", $links);
+    }
+
     /**
      * Process ##codes in post content automatically
      */
