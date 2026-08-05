@@ -127,7 +127,27 @@ class Veyra {
         add_filter('manage_post_posts_columns', array($this, 'veyra_srro_add_column'));
         add_action('manage_post_posts_custom_column', array($this, 'veyra_srro_render_column'), 10, 2);
         add_action('wp_ajax_veyra_toggle_srro', array($this, 'ajax_toggle_srro'));
-        add_action('admin_footer-edit.php', array($this, 'veyra_srro_footer_assets'));
+        add_action('admin_footer-edit.php', array($this, 'veyra_flag_toggle_footer_assets'));
+
+        // "should_remain_on_homepage" column, immediately to the RIGHT of the
+        // should_remain_rolled_off column. Same storage shape as srro, its own
+        // wp_option ('should_remain_on_homepage'). Registered AFTER the srro filter
+        // above so it runs second and can splice itself in after that key — srro
+        // prepends, this one inserts, so the pair always stays adjacent.
+        add_filter('manage_post_posts_columns', array($this, 'veyra_sroh_add_column'));
+        add_action('manage_post_posts_custom_column', array($this, 'veyra_sroh_render_column'), 10, 2);
+        add_action('wp_ajax_veyra_toggle_sroh', array($this, 'ajax_toggle_sroh'));
+
+        // Auto-calibration of posts_per_page around the two should_remain_* flags.
+        // ON by default with no install step: the option row is only ever written
+        // when the user switches it OFF, and a missing row reads as ON. Hooked
+        // outside any is_admin() guard so wp-cron publishing a scheduled post
+        // calibrates too.
+        add_action('wp_ajax_veyra_toggle_autocal', array($this, 'ajax_toggle_autocal'));
+        add_action('transition_post_status', array($this, 'veyra_autocal_on_transition'), 10, 3);
+        // Permanent deletion bypasses transition_post_status entirely, so it needs
+        // its own entry point. Fires while the row still exists.
+        add_action('before_delete_post', array($this, 'veyra_autocal_on_delete'), 10, 2);
 
         // "Blog pages show at most" (posts_per_page) controller placed on edit.php
         // next to the Add Post button, plus a dynamic "ROLLED-OFF POSTS BELOW"
@@ -217,7 +237,10 @@ class Veyra {
         ));
 
         foreach ($pages as $page) {
-            $links[] = '<a href="' . esc_url(get_permalink($page->ID)) . '">' . esc_html(get_the_title($page)) . '</a>';
+            // Raw post_title, not get_the_title() — bypasses the 'the_title' filter
+            // chain (themes/plugins can hook it to shorten titles for card/SEO
+            // display), so the sitemap always links with the full, untruncated title.
+            $links[] = '<a href="' . esc_url(get_permalink($page->ID)) . '">' . esc_html($page->post_title) . '</a>';
         }
 
         return implode('<br>' . "\n", $links);
@@ -1662,52 +1685,106 @@ class Veyra {
     }
 
     /* ---------------------------------------------------------------------
-     * should_remain_rolled_off column (Posts list screen)
+     * should_remain_rolled_off + should_remain_on_homepage columns
+     * (Posts list screen)
+     *
+     * Two independent per-post booleans stating the OPPOSITE intents:
+     *   should_remain_rolled_off_of_homepage — must never appear on feed page 1
+     *   should_remain_on_homepage            — must never fall off feed page 1
+     *
+     * Each is backed by its own single wp_option holding a { post_id => 1 } map.
+     * Absence of a key means FALSE, so neither option row has to exist for the
+     * feature to work — nothing to install, nothing to migrate.
      * ------------------------------------------------------------------- */
 
-    /** Single wp_option storing { post_id => 1 } for posts flagged TRUE. Absence = FALSE. */
     const VEYRA_SRRO_OPTION = 'should_remain_rolled_off_of_homepage';
+    const VEYRA_SROH_OPTION = 'should_remain_on_homepage';
 
-    /** Read the map, always as an array. */
-    private function veyra_srro_get_map() {
-        $map = get_option(self::VEYRA_SRRO_OPTION, array());
+    /** Read one of the flag maps, always as an array. */
+    private function veyra_flag_get_map($option) {
+        $map = get_option($option, array());
         return is_array($map) ? $map : array();
     }
 
-    /** Whether a given post is flagged TRUE. */
-    private function veyra_srro_is_on($post_id) {
-        $map = $this->veyra_srro_get_map();
-        return !empty($map[$post_id]);
+    /** Whether a given post is flagged TRUE in the given map. */
+    private function veyra_flag_is_on($option, $post_id) {
+        $map = $this->veyra_flag_get_map($option);
+        return !empty($map[(int) $post_id]);
     }
 
-    /** Add the column to the LEFT of the checkbox (cb) on the Posts list screen. */
+    private function veyra_srro_is_on($post_id) {
+        return $this->veyra_flag_is_on(self::VEYRA_SRRO_OPTION, $post_id);
+    }
+
+    private function veyra_sroh_is_on($post_id) {
+        return $this->veyra_flag_is_on(self::VEYRA_SROH_OPTION, $post_id);
+    }
+
+    /** Add the srro column to the LEFT of the checkbox (cb) on the Posts list screen. */
     public function veyra_srro_add_column($columns) {
         $new = array();
         // Prepend our column so it renders before the checkbox column.
-        $new['veyra_srro'] = '<span class="veyra-srro-th">should_remain<br>_rolled_off</span>';
+        $new['veyra_srro'] = '<span class="veyra-flag-th">should_remain<br>_rolled_off</span>';
         foreach ($columns as $key => $label) {
             $new[$key] = $label;
         }
         return $new;
     }
 
-    /** Render the toggle switch in each row for our column. */
-    public function veyra_srro_render_column($column, $post_id) {
-        if ($column !== 'veyra_srro') {
-            return;
+    /** Add the sroh column immediately AFTER the srro column. */
+    public function veyra_sroh_add_column($columns) {
+        $label = '<span class="veyra-flag-th">should_remain<br>_on_homepage</span>';
+        if (!isset($columns['veyra_srro'])) {
+            // srro isn't in the list (filter order changed, or it was removed) —
+            // fall back to prepending so the column never silently disappears.
+            return array_merge(array('veyra_sroh' => $label), $columns);
         }
-        $on = $this->veyra_srro_is_on($post_id);
+        $new = array();
+        foreach ($columns as $key => $val) {
+            $new[$key] = $val;
+            if ($key === 'veyra_srro') {
+                $new['veyra_sroh'] = $label;
+            }
+        }
+        return $new;
+    }
+
+    /**
+     * Render one flag toggle.
+     *
+     * The AJAX action rides on the button as a data attribute so a single delegated
+     * click handler drives every flag column — see veyra_flag_toggle_footer_assets().
+     */
+    private function veyra_flag_render_toggle($modifier_class, $option, $ajax_action, $post_id) {
+        $on = $this->veyra_flag_is_on($option, $post_id);
         printf(
-            '<button type="button" class="veyra-srro-toggle%s" data-post="%d" role="switch" aria-checked="%s" title="should_remain_rolled_off_of_homepage: %s"><span class="veyra-srro-knob"></span></button>',
+            '<button type="button" class="veyra-flag-toggle %1$s%2$s" data-post="%3$d" data-action="%4$s" data-label="%5$s" role="switch" aria-checked="%6$s" title="%5$s: %7$s"><span class="veyra-flag-knob"></span></button>',
+            esc_attr($modifier_class),
             $on ? ' is-on' : '',
             (int) $post_id,
+            esc_attr($ajax_action),
+            esc_attr($option),
             $on ? 'true' : 'false',
             $on ? 'TRUE' : 'FALSE'
         );
     }
 
+    public function veyra_srro_render_column($column, $post_id) {
+        if ($column !== 'veyra_srro') {
+            return;
+        }
+        $this->veyra_flag_render_toggle('veyra-srro-toggle', self::VEYRA_SRRO_OPTION, 'veyra_toggle_srro', $post_id);
+    }
+
+    public function veyra_sroh_render_column($column, $post_id) {
+        if ($column !== 'veyra_sroh') {
+            return;
+        }
+        $this->veyra_flag_render_toggle('veyra-sroh-toggle', self::VEYRA_SROH_OPTION, 'veyra_toggle_sroh', $post_id);
+    }
+
     /** AJAX: flip the boolean for a post and persist the single option. */
-    public function ajax_toggle_srro() {
+    private function veyra_flag_ajax_toggle($option) {
         check_ajax_referer('veyra_elephant_tools', 'nonce');
         if (!current_user_can('edit_posts')) {
             wp_send_json_error('Unauthorized');
@@ -1716,19 +1793,27 @@ class Veyra {
         if (!$post_id) {
             wp_send_json_error('Invalid post id');
         }
-        $map = $this->veyra_srro_get_map();
+        $map = $this->veyra_flag_get_map($option);
         $new_on = empty($map[$post_id]); // toggle
         if ($new_on) {
             $map[$post_id] = 1;
         } else {
             unset($map[$post_id]);
         }
-        update_option(self::VEYRA_SRRO_OPTION, $map);
+        update_option($option, $map);
         wp_send_json_success(array('post_id' => $post_id, 'on' => $new_on ? 1 : 0));
     }
 
-    /** Inline CSS + JS for the toggle, only on the Posts list screen. */
-    public function veyra_srro_footer_assets() {
+    public function ajax_toggle_srro() {
+        $this->veyra_flag_ajax_toggle(self::VEYRA_SRRO_OPTION);
+    }
+
+    public function ajax_toggle_sroh() {
+        $this->veyra_flag_ajax_toggle(self::VEYRA_SROH_OPTION);
+    }
+
+    /** Inline CSS + JS for both flag toggles, only on the Posts list screen. */
+    public function veyra_flag_toggle_footer_assets() {
         $screen = function_exists('get_current_screen') ? get_current_screen() : null;
         if (!$screen || $screen->base !== 'edit' || $screen->post_type !== 'post') {
             return;
@@ -1736,37 +1821,46 @@ class Veyra {
         $nonce = wp_create_nonce('veyra_elephant_tools');
         ?>
         <style>
-            .column-veyra_srro { width: 90px; text-align: center; }
-            .veyra-srro-th { display: inline-block; line-height: 1.2; font-weight: 600; }
-            .veyra-srro-toggle {
+            .column-veyra_srro,
+            .column-veyra_sroh { width: 90px; text-align: center; }
+            .veyra-flag-th { display: inline-block; line-height: 1.2; font-weight: 600; }
+            /* One switch widget for every flag column (and for the auto-calibrate
+               switch in the reading controller, which prints on this same screen).
+               Only the "on" colour differs per flag. */
+            .veyra-flag-toggle {
                 position: relative; width: 34px; height: 18px; border-radius: 9px;
                 border: none; padding: 0; cursor: pointer; background-color: #cbd5e1;
                 transition: background-color 0.2s; vertical-align: middle;
             }
-            .veyra-srro-toggle.is-on { background-color: #2563eb; }
-            .veyra-srro-toggle.is-busy { opacity: 0.5; cursor: wait; }
-            .veyra-srro-knob {
+            /* Red = "keep this one OFF the homepage", blue = "keep this one ON it". */
+            .veyra-srro-toggle.is-on { background-color: #dc2626; }
+            .veyra-sroh-toggle.is-on,
+            .veyra-autocal-toggle.is-on { background-color: #2563eb; }
+            .veyra-flag-toggle.is-busy { opacity: 0.5; cursor: wait; }
+            .veyra-flag-knob {
                 position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
                 border-radius: 50%; background-color: #fff; transition: left 0.2s;
                 box-shadow: 0 1px 2px rgba(0,0,0,0.3);
             }
-            .veyra-srro-toggle.is-on .veyra-srro-knob { left: 18px; }
+            .veyra-flag-toggle.is-on .veyra-flag-knob { left: 18px; }
         </style>
         <script>
         (function(){
             var AJAX_URL = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
             var NONCE = <?php echo wp_json_encode($nonce); ?>;
+            // [data-post] deliberately narrows this to the per-row flag switches.
+            // The auto-calibrate switch shares the .veyra-flag-toggle look but carries
+            // no post id and is driven by its own handler in the reading controller.
             document.addEventListener('click', function(e){
-                var btn = e.target.closest ? e.target.closest('.veyra-srro-toggle') : null;
+                var btn = e.target.closest ? e.target.closest('.veyra-flag-toggle[data-post]') : null;
                 if (!btn) return;
                 e.preventDefault();
                 if (btn.classList.contains('is-busy')) return;
                 btn.classList.add('is-busy');
-                var postId = btn.getAttribute('data-post');
                 var body = new URLSearchParams();
-                body.append('action', 'veyra_toggle_srro');
+                body.append('action', btn.getAttribute('data-action'));
                 body.append('nonce', NONCE);
-                body.append('post_id', postId);
+                body.append('post_id', btn.getAttribute('data-post'));
                 fetch(AJAX_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
                     .then(function(r){ return r.json(); })
                     .then(function(res){
@@ -1774,7 +1868,7 @@ class Veyra {
                             var on = !!res.data.on;
                             btn.classList.toggle('is-on', on);
                             btn.setAttribute('aria-checked', on ? 'true' : 'false');
-                            btn.setAttribute('title', 'should_remain_rolled_off_of_homepage: ' + (on ? 'TRUE' : 'FALSE'));
+                            btn.setAttribute('title', btn.getAttribute('data-label') + ': ' + (on ? 'TRUE' : 'FALSE'));
                         } else {
                             alert('Failed to toggle: ' + (res && res.data ? res.data : 'unknown error'));
                         }
@@ -1785,6 +1879,266 @@ class Veyra {
         })();
         </script>
         <?php
+    }
+
+    /* ---------------------------------------------------------------------
+     * Auto-calibrate posts_per_page for the should_remain_* flags
+     *
+     * Keeps the native "Blog pages show at most N posts" setting in sync with the
+     * two flags above so the user never has to reason about N by hand:
+     *
+     *   • a post leaves the feed (publish -> draft/trash/future/anything else) and
+     *     the post it pulls up into the last page-1 slot is flagged
+     *     should_remain_rolled_off  ->  N = N - 1, so that post stays off page 1.
+     *
+     *   • a post enters the feed (draft/future/anything else -> publish, whether by
+     *     hand or by wp-cron) and the post it pushes off the bottom of page 1 is
+     *     flagged should_remain_on_homepage  ->  N = N + 1, so that post stays on.
+     *
+     * Each transition shifts the feed by exactly one slot, so each transition can
+     * move N by at most one. Nothing is recomputed in bulk and nothing is written
+     * unless a flagged post is actually about to cross the page-1 boundary.
+     * ------------------------------------------------------------------- */
+
+    /** Set to '0' only when the user switches the feature off; missing = ON. */
+    const VEYRA_AUTOCAL_OPTION = 'veyra_auto_calibrate_for_should_remain_posts';
+
+    /**
+     * ON unless explicitly switched off.
+     *
+     * The default lives here in code rather than in a row written at activation,
+     * which is what lets a plain file update switch the feature on for every
+     * existing site — no schema run, no deactivate/reactivate.
+     */
+    private function veyra_autocal_is_enabled() {
+        return get_option(self::VEYRA_AUTOCAL_OPTION, '1') !== '0';
+    }
+
+    /** AJAX: turn auto-calibration on/off from the reading controller. */
+    public function ajax_toggle_autocal() {
+        check_ajax_referer('veyra_elephant_tools', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Unauthorized');
+        }
+        $on = isset($_POST['on']) && $_POST['on'] === '1';
+        update_option(self::VEYRA_AUTOCAL_OPTION, $on ? '1' : '0');
+        wp_send_json_success(array('on' => $on ? 1 : 0));
+    }
+
+    /**
+     * The post IDs rendered on feed page 1, in display order, for a given feed state.
+     *
+     * Mirrors WP_Query for the posts page (class-wp-query.php, "Put sticky posts at
+     * the top of the posts array"): the first $per_page published posts by
+     * post_date DESC, then core's sticky hoist. Published stickies INSIDE that
+     * window are relocated to the front; published stickies OUTSIDE it are spliced
+     * in on top without displacing anything. That second half is why a site using
+     * stickies renders more than $per_page rows on page 1, and why this can return
+     * more than $per_page IDs. Core applies the hoist to page 1 only, which is the
+     * only page this calculation ever asks about.
+     *
+     * Core adds no tiebreaker to its ORDER BY, so posts sharing a post_date to the
+     * second come back in whatever order MySQL likes; ID DESC is appended here
+     * purely to make this calculation deterministic.
+     *
+     * The two hypothetical parameters let a caller ask what page 1 looked like on
+     * the other side of the single post that just changed:
+     *
+     * @param int          $per_page
+     * @param int          $exclude_id Treat this post as not published / not there.
+     * @param WP_Post|null $extra      Treat this post as published.
+     * @return int[]
+     */
+    private function veyra_feed_page_one_ids($per_page, $exclude_id = 0, $extra = null) {
+        global $wpdb;
+        $per_page   = max(1, (int) $per_page);
+        $exclude_id = (int) $exclude_id;
+
+        $where = "post_type = 'post' AND post_status = 'publish'";
+        $args  = array();
+        if ($exclude_id) {
+            $where  .= ' AND ID <> %d';
+            $args[]  = $exclude_id;
+        }
+        $args[] = $per_page;
+        $window = $this->veyra_feed_rows($wpdb->prepare(
+            "SELECT ID, post_date FROM {$wpdb->posts}
+              WHERE {$where}
+              ORDER BY post_date DESC, ID DESC
+              LIMIT %d",
+            $args
+        ));
+
+        // A hypothetical extra post would have taken a slot in the window, pushing
+        // the row that sat in the last one out of it.
+        $add_extra = ($extra instanceof WP_Post) && (int) $extra->ID !== $exclude_id;
+        if ($add_extra) {
+            $window = array_slice($this->veyra_feed_splice($window, $extra), 0, $per_page);
+        }
+
+        $sticky = array_filter(array_map('intval', (array) get_option('sticky_posts', array())));
+        if (empty($sticky)) {
+            return wp_list_pluck($window, 'ID');
+        }
+
+        // Every PUBLISHED sticky heads page 1, window or no window. In-window ones
+        // are always newer than out-of-window ones, so core's two-step hoist leaves
+        // the whole front block in plain post_date DESC order.
+        $args  = $sticky;
+        $where = 'ID IN (' . implode(',', array_fill(0, count($sticky), '%d')) . ")
+                  AND post_type = 'post' AND post_status = 'publish'";
+        if ($exclude_id) {
+            $where  .= ' AND ID <> %d';
+            $args[]  = $exclude_id;
+        }
+        $front = $this->veyra_feed_rows($wpdb->prepare(
+            "SELECT ID, post_date FROM {$wpdb->posts}
+              WHERE {$where}
+              ORDER BY post_date DESC, ID DESC",
+            $args
+        ));
+        if ($add_extra && in_array((int) $extra->ID, $sticky, true)) {
+            $front = $this->veyra_feed_splice($front, $extra);
+        }
+
+        $front_ids = wp_list_pluck($front, 'ID');
+        $rest      = array();
+        foreach ($window as $row) {
+            if (!in_array($row->ID, $front_ids, true)) {
+                $rest[] = $row->ID;
+            }
+        }
+        return array_merge($front_ids, $rest);
+    }
+
+    /** Run a prepared ID/post_date query and normalize the rows (ID always an int). */
+    private function veyra_feed_rows($prepared_sql) {
+        global $wpdb;
+        $out = array();
+        foreach ((array) $wpdb->get_results($prepared_sql) as $row) {
+            $out[] = (object) array('ID' => (int) $row->ID, 'post_date' => $row->post_date);
+        }
+        return $out;
+    }
+
+    /** Insert $post into an already post_date-DESC-ordered row list at its own slot. */
+    private function veyra_feed_splice($rows, $post) {
+        $entry = (object) array('ID' => (int) $post->ID, 'post_date' => $post->post_date);
+        $at    = count($rows);
+        foreach ($rows as $i => $row) {
+            if ($row->post_date < $entry->post_date
+                || ($row->post_date === $entry->post_date && $row->ID < $entry->ID)) {
+                $at = $i;
+                break;
+            }
+        }
+        array_splice($rows, $at, 0, array($entry));
+        return $rows;
+    }
+
+    /** posts_per_page if calibration should run at all, or 0 to stand down. */
+    private function veyra_autocal_per_page() {
+        if (!$this->veyra_autocal_is_enabled()) {
+            return 0;
+        }
+        $per_page = (int) get_option('posts_per_page', 10);
+        // -1 means "show every post" — there is no page 2 to protect.
+        return $per_page >= 1 ? $per_page : 0;
+    }
+
+    /** transition_post_status: a post entered or left the published feed. */
+    public function veyra_autocal_on_transition($new_status, $old_status, $post) {
+        if ($new_status === $old_status) {
+            return;
+        }
+        if (!($post instanceof WP_Post) || $post->post_type !== 'post') {
+            return;
+        }
+        $per_page = $this->veyra_autocal_per_page();
+        if (!$per_page) {
+            return;
+        }
+
+        if ($old_status === 'publish' && $new_status !== 'publish') {
+            // The DB already reflects the departure, so the BEFORE line-up is the
+            // current feed with this post put back where it used to sit.
+            $this->veyra_autocal_apply(
+                $this->veyra_feed_page_one_ids($per_page, 0, $post),
+                $this->veyra_feed_page_one_ids($per_page),
+                $per_page,
+                (int) $post->ID
+            );
+        } elseif ($new_status === 'publish' && $old_status !== 'publish') {
+            // ...and here the BEFORE line-up is the current feed with it taken out.
+            $this->veyra_autocal_apply(
+                $this->veyra_feed_page_one_ids($per_page, (int) $post->ID),
+                $this->veyra_feed_page_one_ids($per_page),
+                $per_page,
+                (int) $post->ID
+            );
+        }
+    }
+
+    /**
+     * before_delete_post: a post is about to be erased for good.
+     *
+     * Permanent deletion never fires transition_post_status, so without this a
+     * published post could be nuked straight out of page 1 and pull a rolled-off
+     * post up behind it uncalibrated. The row still exists at this point, which
+     * makes the AFTER line-up the hypothetical one here.
+     */
+    public function veyra_autocal_on_delete($post_id, $post = null) {
+        if (!($post instanceof WP_Post)) {
+            $post = get_post($post_id);
+        }
+        if (!($post instanceof WP_Post) || $post->post_type !== 'post') {
+            return;
+        }
+        // Only a PUBLISHED post is leaving the feed here. Emptying the trash deletes
+        // posts that left it back at trash time and were calibrated for then.
+        if ($post->post_status !== 'publish') {
+            return;
+        }
+        $per_page = $this->veyra_autocal_per_page();
+        if (!$per_page) {
+            return;
+        }
+
+        $this->veyra_autocal_apply(
+            $this->veyra_feed_page_one_ids($per_page),
+            $this->veyra_feed_page_one_ids($per_page, (int) $post->ID),
+            $per_page,
+            (int) $post->ID
+        );
+    }
+
+    /**
+     * Compare the two page-1 line-ups and move posts_per_page by one if this change
+     * crossed a flagged post over the boundary.
+     *
+     * Diffing the actual line-ups instead of doing index arithmetic is what makes
+     * sticky posts a non-issue: whatever core would hoist is already baked into both
+     * sides of the comparison, so a sticky that never moves never shows up in a diff.
+     *
+     * $ignore_id is the post that just changed. It sits on exactly one side of the
+     * diff by definition, and its own flags must not fire anything — the flags say
+     * where a post should sit, not what publishing or deleting it should cost.
+     */
+    private function veyra_autocal_apply($before, $after, $per_page, $ignore_id) {
+        foreach (array_diff($after, $before) as $id) {   // newly ON page 1
+            if ($id !== $ignore_id && $this->veyra_srro_is_on($id)) {
+                if ($per_page > 1) {                     // never drive the setting below 1
+                    update_option('posts_per_page', $per_page - 1);
+                }
+                return;
+            }
+        }
+        foreach (array_diff($before, $after) as $id) {   // newly OFF page 1
+            if ($id !== $ignore_id && $this->veyra_sroh_is_on($id)) {
+                update_option('posts_per_page', $per_page + 1);
+                return;
+            }
+        }
     }
 
     /* ---------------------------------------------------------------------
@@ -2143,7 +2497,8 @@ class Veyra {
                freed by the hidden columns is handed to the column that has no declared
                width — so Title (and Date, at core's 14%) absorb all of it. Pinning srro
                and the checkbox stops them soaking up leftover instead of Title. */
-            .fixed .column-veyra_srro { width: 90px; }
+            .fixed .column-veyra_srro,
+            .fixed .column-veyra_sroh { width: 90px; }
             .fixed .check-column { width: 2.2em; }
             /* Narrow these if they get toggled back on, so Title keeps usable width.
                Core sets author 10%, categories/tags 15%, comments 5.5em. */
@@ -2479,9 +2834,10 @@ class Veyra {
         if (!$screen || $screen->base !== 'edit' || $screen->post_type !== 'post') {
             return;
         }
-        $per_page  = (int) get_option('posts_per_page', 10);
-        $can_edit  = current_user_can('manage_options');
-        $nonce     = wp_create_nonce('veyra_elephant_tools');
+        $per_page    = (int) get_option('posts_per_page', 10);
+        $can_edit    = current_user_can('manage_options');
+        $autocal_on  = $this->veyra_autocal_is_enabled();
+        $nonce       = wp_create_nonce('veyra_elephant_tools');
         ?>
         <style>
             .veyra-reading-ctl {
@@ -2491,6 +2847,14 @@ class Veyra {
             }
             .veyra-reading-ctl input[type="number"] { width: 64px; }
             .veyra-reading-ctl .veyra-reading-status { color: #46b450; font-weight: 600; }
+            /* Divider so the auto-calibrate switch reads as its own control rather
+               than as part of the Save button's group. The switch itself reuses
+               .veyra-flag-toggle, printed by veyra_flag_toggle_footer_assets() on
+               this same screen. */
+            .veyra-reading-ctl .veyra-autocal {
+                display: inline-flex; align-items: center; gap: 6px;
+                margin-left: 4px; padding-left: 10px; border-left: 1px solid #c3c4c7;
+            }
             tr.veyra-rolloff-separator td {
                 height: 20px; line-height: 20px; padding: 0 10px;
                 background: #111827; color: #fff; font-weight: 700; letter-spacing: 0.02em;
@@ -2503,6 +2867,7 @@ class Veyra {
             var NONCE = <?php echo wp_json_encode($nonce); ?>;
             var CAN_EDIT = <?php echo $can_edit ? 'true' : 'false'; ?>;
             var perPage = <?php echo (int) $per_page; ?>;
+            var AUTOCAL_ON = <?php echo $autocal_on ? 'true' : 'false'; ?>;
 
             // --- 1) Controller next to the "Add Post" button -----------------
             function buildController(){
@@ -2516,12 +2881,45 @@ class Veyra {
                     + '<input type="number" min="1" step="1" class="veyra-reading-input" value="' + perPage + '"> '
                     + '<span>posts</span>'
                     + '<button type="button" class="button button-primary veyra-reading-save">Save</button>'
-                    + '<span class="veyra-reading-status"></span>';
+                    + '<span class="veyra-reading-status"></span>'
+                    + '<span class="veyra-autocal">'
+                    +   '<button type="button" class="veyra-flag-toggle veyra-autocal-toggle' + (AUTOCAL_ON ? ' is-on' : '') + '"'
+                    +     ' role="switch" aria-checked="' + (AUTOCAL_ON ? 'true' : 'false') + '"'
+                    +     ' title="auto-calibrate for should-remain posts: ' + (AUTOCAL_ON ? 'ON' : 'OFF') + '">'
+                    +     '<span class="veyra-flag-knob"></span>'
+                    +   '</button>'
+                    +   '<span>auto-calibrate for should-remain posts</span>'
+                    + '</span>';
                 addBtn.insertAdjacentElement('afterend', wrap);
 
                 var input  = wrap.querySelector('.veyra-reading-input');
                 var save   = wrap.querySelector('.veyra-reading-save');
                 var status = wrap.querySelector('.veyra-reading-status');
+                var acBtn  = wrap.querySelector('.veyra-autocal-toggle');
+
+                acBtn.addEventListener('click', function(){
+                    if (acBtn.classList.contains('is-busy')) return;
+                    acBtn.classList.add('is-busy');
+                    var next = !acBtn.classList.contains('is-on');
+                    var body = new URLSearchParams();
+                    body.append('action', 'veyra_toggle_autocal');
+                    body.append('nonce', NONCE);
+                    body.append('on', next ? '1' : '0');
+                    fetch(AJAX_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+                        .then(function(r){ return r.json(); })
+                        .then(function(res){
+                            if (res && res.success) {
+                                var on = !!res.data.on;
+                                acBtn.classList.toggle('is-on', on);
+                                acBtn.setAttribute('aria-checked', on ? 'true' : 'false');
+                                acBtn.setAttribute('title', 'auto-calibrate for should-remain posts: ' + (on ? 'ON' : 'OFF'));
+                            } else {
+                                alert('Failed to toggle: ' + (res && res.data ? res.data : 'unknown error'));
+                            }
+                        })
+                        .catch(function(err){ alert('Toggle request failed: ' + err.message); })
+                        .finally(function(){ acBtn.classList.remove('is-busy'); });
+                });
 
                 save.addEventListener('click', function(){
                     var val = parseInt(input.value, 10);
