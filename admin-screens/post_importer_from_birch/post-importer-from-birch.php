@@ -130,6 +130,8 @@ function veyra_post_importer_handle_submit() {
     $post_status = (isset($_POST['veyra_post_status']) && $_POST['veyra_post_status'] === 'publish') ? 'publish' : 'draft';
     $image_style = (isset($_POST['veyra_image_display']) && $_POST['veyra_image_display'] === 'wp_medium') ? 'wp_medium' : 'plain';
     $alignment_mode = veyra_post_importer_resolve_alignment_mode($_POST['veyra_image_alignment'] ?? 'global_random_3');
+    // SHOULD_REMAIN_ON_HOMEPAGE — TRUE unless the user picked the second radio.
+    $sroh_true = !(isset($_POST['veyra_should_remain_on_homepage']) && $_POST['veyra_should_remain_on_homepage'] === 'false');
 
     $tmp_zip = $_FILES['veyra_pack']['tmp_name'];
 
@@ -204,16 +206,20 @@ function veyra_post_importer_handle_submit() {
     if (!empty($res['error'])) {
         return ['level' => 'error', 'message' => $res['error']];
     }
+
+    veyra_post_importer_apply_sroh_flag([(int) $res['post_id']], $sroh_true);
+
     return [
         'level'    => 'success',
         'message'  => sprintf(
-            '%1$s %2$s (ID %3$d, status: %4$s). Images embedded: %5$d.%6$s',
+            '%1$s %2$s (ID %3$d, status: %4$s). Images embedded: %5$d.%6$s should_remain_on_homepage set to %7$s.',
             $res['updated'] ? 'Updated existing' : 'Created',
             $post_type,
             $res['post_id'],
             $post_status,
             $res['images'],
-            $res['backlink_id'] !== '' ? ' [backlink_id ' . $res['backlink_id'] . ']' : ''
+            $res['backlink_id'] !== '' ? ' [backlink_id ' . $res['backlink_id'] . ']' : '',
+            $sroh_true ? 'TRUE' : 'FALSE'
         ),
         'edit_url' => $res['edit_url'],
         'view_url' => $res['view_url'],
@@ -388,6 +394,8 @@ function veyra_post_importer_handle_bulk_submit() {
     $post_status = (isset($_POST['veyra_post_status']) && $_POST['veyra_post_status'] === 'publish') ? 'publish' : 'draft';
     $image_style = (isset($_POST['veyra_image_display']) && $_POST['veyra_image_display'] === 'wp_medium') ? 'wp_medium' : 'plain';
     $alignment_mode = veyra_post_importer_resolve_alignment_mode($_POST['veyra_image_alignment'] ?? 'global_random_3');
+    // SHOULD_REMAIN_ON_HOMEPAGE — TRUE unless the user picked the second radio.
+    $sroh_true = !(isset($_POST['veyra_should_remain_on_homepage']) && $_POST['veyra_should_remain_on_homepage'] === 'false');
 
     $zip = new ZipArchive();
     if ($zip->open($_FILES['veyra_pack']['tmp_name']) !== true) {
@@ -413,11 +421,12 @@ function veyra_post_importer_handle_bulk_submit() {
         return ['level' => 'error', 'message' => 'No subfolders found in the zip. Expected one folder per article (each with article.txt).'];
     }
 
-    $results   = [];
-    $seen_ids  = [];
-    $created   = 0;
-    $updated   = 0;
-    $skipped   = 0;
+    $results      = [];
+    $seen_ids     = [];
+    $imported_ids = [];
+    $created      = 0;
+    $updated      = 0;
+    $skipped      = 0;
 
     foreach ($folders as $folder => $parts) {
         if (empty($parts['article'])) { $skipped++; continue; }
@@ -439,16 +448,52 @@ function veyra_post_importer_handle_bulk_submit() {
             continue;
         }
         if ($res['updated']) $updated++; else $created++;
+        $imported_ids[] = (int) $res['post_id'];
         $results[] = $res;
     }
     $zip->close();
 
+    veyra_post_importer_apply_sroh_flag($imported_ids, $sroh_true);
+
     return [
         'level'   => 'success',
         'bulk'    => true,
-        'message' => sprintf('Bulk import complete: %d created, %d updated, %d skipped (of %d folders).', $created, $updated, $skipped, count($folders)),
+        'message' => sprintf(
+            'Bulk import complete: %d created, %d updated, %d skipped (of %d folders). should_remain_on_homepage set to %s for %d post(s).',
+            $created, $updated, $skipped, count($folders),
+            $sroh_true ? 'TRUE' : 'FALSE',
+            count($imported_ids)
+        ),
         'results' => $results,
     ];
+}
+
+/**
+ * Stamp the SHOULD_REMAIN_ON_HOMEPAGE choice onto everything this run imported.
+ *
+ * The flag lives in the single wp_option Veyra keeps as a { post_id => 1 } map,
+ * where absence of a key IS false — so "set to FALSE" means unsetting the key,
+ * which is what makes the choice stick when a re-import lands on a post that was
+ * already flagged. Written once for the whole run rather than per post, since the
+ * option is one shared blob.
+ */
+function veyra_post_importer_apply_sroh_flag(array $post_ids, $flag_true) {
+    if (empty($post_ids)) {
+        return;
+    }
+    $option = class_exists('Veyra') ? Veyra::VEYRA_SROH_OPTION : 'should_remain_on_homepage';
+    $map    = get_option($option, []);
+    if (!is_array($map)) {
+        $map = [];
+    }
+    foreach ($post_ids as $id) {
+        if ($flag_true) {
+            $map[$id] = 1;
+        } else {
+            unset($map[$id]);
+        }
+    }
+    update_option($option, $map);
 }
 
 /**
@@ -734,8 +779,14 @@ function veyra_post_importer_render_page() {
             </div>
         <?php endif; ?>
 
-        <form method="post" action="<?php echo esc_url($self); ?>" enctype="multipart/form-data" style="max-width: 640px;">
+        <form method="post" action="<?php echo esc_url($self); ?>" enctype="multipart/form-data" style="max-width: 1360px;">
             <input type="hidden" name="veyra_post_importer_nonce" value="<?php echo esc_attr($nonce); ?>" />
+
+            <!-- Two columns so the import pack + run buttons sit beside the options
+                 instead of below them, keeping the whole screen visible without a
+                 scroll. Wraps back to one column on a narrow viewport. -->
+            <div style="display: flex; align-items: flex-start; gap: 28px; flex-wrap: wrap;">
+            <div style="flex: 1 1 620px; min-width: 420px;">
 
             <fieldset style="margin-bottom: 16px;">
                 <legend style="font-weight: 600; margin-bottom: 6px;">Post type</legend>
@@ -816,6 +867,27 @@ function veyra_post_importer_render_page() {
                 </p>
             </fieldset>
 
+            <fieldset style="margin-bottom: 16px;">
+                <legend style="font-weight: 600; margin-bottom: 6px;">SHOULD_REMAIN_ON_HOMEPAGE</legend>
+                <label style="display: block; margin-bottom: 4px;">
+                    <input type="radio" name="veyra_should_remain_on_homepage" value="true" checked />
+                    set flag to TRUE for should_remain_on_homepage
+                </label>
+                <label style="display: block;">
+                    <input type="radio" name="veyra_should_remain_on_homepage" value="false" />
+                    set flag to FALSE for should_remain_on_homepage
+                </label>
+                <p style="color: #666; font-size: 12px; margin-top: 4px;">
+                    Applied by <strong>both</strong> f5607 and f5608 to every post they create or update.
+                    FALSE clears the flag, which matters when a re-import lands on a post that already carries it.
+                </p>
+            </fieldset>
+
+            </div><!-- /left column -->
+
+            <div style="flex: 1 1 460px; min-width: 380px;">
+            <div style="background: #f6f7f7; border: 1px solid #c3c4c7; border-radius: 4px; padding: 16px;">
+
             <fieldset style="margin-bottom: 20px;">
                 <legend style="font-weight: 600; margin-bottom: 6px;">Import pack (.zip from birch wizard)</legend>
                 <input type="file" name="veyra_pack" accept=".zip" required />
@@ -827,8 +899,8 @@ function veyra_post_importer_render_page() {
             </fieldset>
 
             <button type="submit" name="veyra_post_importer_action" value="f5607_import" class="button button-primary"
-                    style="padding: 8px 20px; font-size: 14px; background: #22c55e; border-color: #16a34a; color: #fff;">
-                f5607 - import birch-to-veyra article import pack
+                    style="padding: 8px 20px; font-size: 14px; background: #6b7280; border-color: #4b5563; color: #fff;">
+                (deprecated) f5607 - import birch-to-veyra article import pack
             </button>
 
             <div style="margin-top: 14px; padding-top: 14px; border-top: 1px solid #e5e5e5;">
@@ -837,6 +909,10 @@ function veyra_post_importer_render_page() {
                     f5608 - bulk import birch-to-veyra article import pack
                 </button>
             </div>
+
+            </div><!-- /panel -->
+            </div><!-- /right column -->
+            </div><!-- /columns -->
         </form>
     </div>
     <?php
