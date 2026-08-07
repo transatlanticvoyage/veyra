@@ -22,6 +22,23 @@ define('VEYRA_PLUGIN_PATH', plugin_dir_path(__FILE__));
 define('VEYRA_PLUGIN_URL', plugin_dir_url(__FILE__));
 
 /**
+ * Table-name accessors for the post-editor sidebar boxes.
+ *
+ * Defined up here (rather than as class methods) so the feature code under
+ * /editor-boxes/ can reach them without depending on the $veyra instance
+ * existing yet. The schema itself is defined in
+ * Veyra::veyra_editor_boxes_create_tables() further down this file.
+ */
+function veyra_pda_table() {
+    global $wpdb;
+    return $wpdb->prefix . 'veyra_post_drip_actions';
+}
+function veyra_pah_table() {
+    global $wpdb;
+    return $wpdb->prefix . 'veyra_post_status_log';
+}
+
+/**
  * Normalize fossil content before it is saved or rendered.
  *
  * Guards against LITERAL escape sequences ending up in the option value — e.g. a
@@ -88,6 +105,12 @@ class Veyra {
         // version changes — no plugin reactivation required.
         add_action('init', array($this, 'veyra_sm_maybe_upgrade_db'));
         add_action('rest_api_init', array($this, 'veyra_sm_register_routes'));
+
+        // Post-editor sidebar boxes (veyra_post_drip_actions / veyra_post_status_log).
+        // Same deal as the sm_* tables: created on plugin activation AND checked
+        // on init, so a deactivate/reactivate on a live site builds them, and a
+        // plain code upload picks up schema changes without reactivating.
+        add_action('init', array($this, 'veyra_editor_boxes_maybe_upgrade_db'), 4);
 
         // Structure-Medic post-editor panel (Classic editor): a full-width bar
         // above the title showing/editing this page's sm_* data. Inputs live
@@ -1286,6 +1309,209 @@ class Veyra {
   KEY page_source_id (page_source_id),
   KEY source_domain (source_domain)
 ) {$charset};");
+    }
+
+    // =====================================================================
+    // Post-editor sidebar boxes — DB schema
+    //
+    // Backs the two boxes at the bottom of the post/page editor sidebar:
+    //   - "Veyra Post Drip Actions"   -> veyra_post_drip_actions (the queue)
+    //   - "Veyra Post Actions History" -> veyra_post_status_log  (the audit log)
+    //
+    // The behaviour for both lives in /editor-boxes/<folder>/, but the schema is
+    // defined here so it is created by the SAME activation hook as the sm_*
+    // tables. Practical effect on a live site: upload the plugin changes, then
+    // deactivate + reactivate Veyra and both tables appear. The init-time
+    // version check below is the belt-and-braces path for when the plugin is
+    // updated in place without ever being reactivated.
+    // =====================================================================
+
+    /** Bump this when the DDL in veyra_editor_boxes_create_tables() changes.
+     *  v2: post_date before/after tracking on the status log.
+     *  v3: event_target_gmt, so drip-queue events snapshot what they aim at. */
+    const VEYRA_EDITOR_BOXES_DB_VERSION = '3';
+
+    /** Map logical table key => full table name (with wpdb prefix). */
+    public function veyra_editor_boxes_tables() {
+        return array(
+            'drip_actions' => veyra_pda_table(),
+            'status_log'   => veyra_pah_table(),
+        );
+    }
+
+    /**
+     * Create or upgrade the editor-box tables when the version changes.
+     *
+     * The stored version is only advanced once the resulting schema has been
+     * VERIFIED to contain every expected column. Without that check a dbDelta
+     * that silently no-ops would still mark the upgrade as done, and the code
+     * would then spend the rest of its life writing to columns that do not
+     * exist — failing on every insert with no obvious cause. Leaving the option
+     * untouched instead means the upgrade is simply retried on the next request.
+     */
+    public function veyra_editor_boxes_maybe_upgrade_db() {
+        if (get_option('veyra_editor_boxes_db_version') === self::VEYRA_EDITOR_BOXES_DB_VERSION) {
+            return;
+        }
+        $this->veyra_editor_boxes_create_tables();
+
+        $missing = $this->veyra_editor_boxes_missing_columns();
+        if ($missing) {
+            error_log('Veyra: editor-box DB upgrade incomplete, missing columns: '
+                . implode(', ', $missing) . ' — will retry on the next request.');
+            return;
+        }
+
+        update_option('veyra_editor_boxes_db_version', self::VEYRA_EDITOR_BOXES_DB_VERSION, false);
+    }
+
+    /**
+     * Columns the current code writes to, that are not actually present in the
+     * database. Empty array means the schema is good. Used as the gate above and
+     * available for diagnostics.
+     */
+    public function veyra_editor_boxes_missing_columns() {
+        global $wpdb;
+
+        $expected = array(
+            veyra_pda_table() => array(
+                'id', 'post_id', 'action_type', 'action_value', 'scheduled_for_gmt',
+                'scheduled_for_local', 'status', 'executed_at_gmt', 'status_before',
+                'status_after', 'result_note', 'log_id', 'notes', 'created_at_gmt',
+                'created_by', 'canceled_at_gmt', 'canceled_by',
+            ),
+            veyra_pah_table() => array(
+                'id', 'post_id', 'post_type', 'event_type', 'old_status', 'new_status',
+                'changed_at_gmt', 'post_date_before', 'post_date_after',
+                'post_date_gmt_before', 'post_date_gmt_after', 'user_id', 'user_login',
+                'source', 'source_detail', 'drip_action_id', 'event_target_gmt',
+            ),
+        );
+
+        $missing = array();
+        foreach ($expected as $table => $columns) {
+            if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table)) !== $table) {
+                $missing[] = $table . ' (table absent)';
+                continue;
+            }
+            $actual = $wpdb->get_col("SHOW COLUMNS FROM {$table}");
+            foreach (array_diff($columns, (array) $actual) as $col) {
+                $missing[] = $table . '.' . $col;
+            }
+        }
+        return $missing;
+    }
+
+    /**
+     * Run dbDelta for both editor-box tables. Safe to call repeatedly.
+     *
+     * Also fired directly by register_activation_hook(), which is why it does
+     * not consult the version option itself — reactivating the plugin should
+     * always re-assert the schema, even if the stored version already matches.
+     */
+    public function veyra_editor_boxes_create_tables() {
+        global $wpdb;
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+        $t       = $this->veyra_editor_boxes_tables();
+        $charset = $wpdb->get_charset_collate();
+
+        // Box 1 — one row per SCHEDULED action, so a post can hold several
+        // queued actions at once, each independently cancelable. Rows are never
+        // deleted: done/canceled/failed rows are the audit trail of the queue.
+        // The `due` index is what the WP-Cron sweep reads.
+        dbDelta("CREATE TABLE {$t['drip_actions']} (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  post_id bigint(20) unsigned NOT NULL,
+  action_type varchar(64) NOT NULL DEFAULT 'set_status',
+  action_value varchar(191) NOT NULL DEFAULT '',
+  scheduled_for_gmt datetime NOT NULL,
+  scheduled_for_local datetime NULL,
+  status varchar(20) NOT NULL DEFAULT 'pending',
+  executed_at_gmt datetime NULL,
+  status_before varchar(20) NULL,
+  status_after varchar(20) NULL,
+  result_note text,
+  log_id bigint(20) unsigned NULL,
+  notes text,
+  created_at_gmt datetime NOT NULL,
+  created_by bigint(20) unsigned NULL,
+  canceled_at_gmt datetime NULL,
+  canceled_by bigint(20) unsigned NULL,
+  PRIMARY KEY  (id),
+  KEY due (status, scheduled_for_gmt),
+  KEY post_status (post_id, status)
+) {$charset};");
+
+        // Box 2 — one row per post event, written by transition_post_status
+        // (status changes) and post_updated (date changes, plus the before/after
+        // dates on a status change) no matter what caused it. Completely
+        // independent of the drip queue above; drip-caused changes just land
+        // here with source='veyra_drip' and drip_action_id set.
+        //
+        // Why post_date is stored twice: WP leaves post_date_gmt as
+        // '0000-00-00 00:00:00' on drafts (a "floating" date) while post_date
+        // always carries a real value. Detection and display therefore run off
+        // the local post_date pair; the _gmt pair is the unambiguous canonical
+        // record, and is NULL whenever the date was floating.
+        //
+        // event_target_gmt holds the future time a drip-queue event points at
+        // (a copy of that action's scheduled_for_gmt), frozen at write time.
+        // Denormalized deliberately, for the same reason user_login is: an
+        // audit row must keep saying what was true when it was written, even
+        // after the drip row it references moves on to canceled/done. The live
+        // state of that action is fetched separately, via a LEFT JOIN on
+        // drip_action_id, and rendered as clearly-marked present-tense context.
+        // NULL on every event that is not a drip-queue event.
+        dbDelta("CREATE TABLE {$t['status_log']} (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  post_id bigint(20) unsigned NOT NULL,
+  post_type varchar(20) NOT NULL DEFAULT '',
+  event_type varchar(32) NOT NULL DEFAULT 'status_change',
+  old_status varchar(20) NOT NULL DEFAULT '',
+  new_status varchar(20) NOT NULL DEFAULT '',
+  changed_at_gmt datetime NOT NULL,
+  post_date_before datetime NULL,
+  post_date_after datetime NULL,
+  post_date_gmt_before datetime NULL,
+  post_date_gmt_after datetime NULL,
+  user_id bigint(20) unsigned NULL,
+  user_login varchar(60) NOT NULL DEFAULT '',
+  source varchar(32) NOT NULL DEFAULT '',
+  source_detail varchar(191) NOT NULL DEFAULT '',
+  drip_action_id bigint(20) unsigned NULL,
+  event_target_gmt datetime NULL,
+  PRIMARY KEY  (id),
+  KEY post_time (post_id, changed_at_gmt),
+  KEY changed (changed_at_gmt)
+) {$charset};");
+
+        $this->veyra_editor_boxes_migrate_v2();
+    }
+
+    /**
+     * v1 -> v2: fold the old single post_date_gmt column into the new
+     * before/after pair, then drop it.
+     *
+     * Lives here (rather than in the version-guarded upgrade path) so that the
+     * activation hook — which calls create_tables directly — performs it too.
+     * Guarded on the legacy column still existing, so it is a no-op every time
+     * after the first.
+     */
+    private function veyra_editor_boxes_migrate_v2() {
+        global $wpdb;
+        $table = veyra_pah_table();
+
+        $columns = $wpdb->get_col("SHOW COLUMNS FROM {$table}");
+        if (!is_array($columns) || !in_array('post_date_gmt', $columns, true)) {
+            return;
+        }
+
+        // The legacy column held the post's date as of the event, i.e. "after".
+        $wpdb->query("UPDATE {$table}
+                         SET post_date_gmt_after = post_date_gmt
+                       WHERE post_date_gmt_after IS NULL
+                         AND post_date_gmt IS NOT NULL");
+        $wpdb->query("ALTER TABLE {$table} DROP COLUMN post_date_gmt");
     }
 
     /** Register the ingest REST route used by structure-medic Phase 10. */
@@ -3511,6 +3737,13 @@ $veyra = new Veyra();
 // Create sm_* tables on activation (init-time check also covers code updates).
 register_activation_hook(__FILE__, array($veyra, 'veyra_sm_create_tables'));
 
+// Create the post-editor sidebar box tables (veyra_post_drip_actions /
+// veyra_post_status_log) on activation. On a live site: upload the plugin
+// changes, then deactivate + reactivate Veyra and both tables are built.
+// veyra_editor_boxes_maybe_upgrade_db() on init covers in-place code updates
+// where the plugin is never reactivated.
+register_activation_hook(__FILE__, array($veyra, 'veyra_editor_boxes_create_tables'));
+
 // ---------------------------------------------------------------------------
 // Admin screens — each under /admin-screens/<folder>/ self-registers its menu
 // and render callback. Keeps page-specific code out of this main file.
@@ -3523,3 +3756,19 @@ require_once VEYRA_PLUGIN_PATH . 'admin-screens/custom_blog_feed/custom-blog-fee
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/page-change-drip-manager/page-change-drip-manager.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/veyra-site-title-and-footer-mar/veyra-site-title-and-footer-mar.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/veyra-change-wp-user-and-pass/veyra-change-wp-user-and-pass.php';
+require_once VEYRA_PLUGIN_PATH . 'admin-screens/veyra-drip-actions-jar/veyra-drip-actions-jar.php';
+require_once VEYRA_PLUGIN_PATH . 'admin-screens/post-status-log-jar/post-status-log-jar.php';
+
+// ---------------------------------------------------------------------------
+// Post-editor sidebar boxes — each under /editor-boxes/<folder>/ self-registers
+// its meta box, AJAX handlers and (for the drip queue) its cron hooks. Their
+// tables are declared in this file; see veyra_editor_boxes_create_tables().
+// ---------------------------------------------------------------------------
+require_once VEYRA_PLUGIN_PATH . 'editor-boxes/veyra-post-actions-history/veyra-post-actions-history.php';
+require_once VEYRA_PLUGIN_PATH . 'editor-boxes/veyra-post-drip-actions/veyra-post-drip-actions.php';
+
+// ---------------------------------------------------------------------------
+// List-table columns — each under /list-table-columns/<folder>/ self-registers
+// its column on the relevant wp-admin list screens.
+// ---------------------------------------------------------------------------
+require_once VEYRA_PLUGIN_PATH . 'list-table-columns/veyra-drip-actions-column/veyra-drip-actions-column.php';
