@@ -3,7 +3,7 @@
  * Plugin Name: Veyra
  * Plugin URI: https://github.com/transatlanticvoyage/veyra
  * Description: Veyra WordPress plugin.
- * Version: 1.2.1
+ * Version: 1.2.2
  * Author: Veyra Team
  * License: GPL v2 or later
  */
@@ -17,7 +17,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants
-define('VEYRA_PLUGIN_VERSION', '1.2.1');
+define('VEYRA_PLUGIN_VERSION', '1.2.2');
 define('VEYRA_PLUGIN_PATH', plugin_dir_path(__FILE__));
 define('VEYRA_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -715,6 +715,15 @@ class Veyra {
             . 'display:flex;align-items:center;white-space:nowrap;}'
             . '#wpadminbar #wp-admin-bar-veyra-hub-1 > .ab-item img{'
             . 'width:16px;height:16px;margin:0 6px 0 0;vertical-align:middle;flex:0 0 auto;}'
+            // "Birch Post Imported" shortcut: blue background, white text. Two IDs
+            // in the selector outrank core's admin-bar and color-scheme rules, so
+            // no !important is needed.
+            . '#wpadminbar #wp-admin-bar-veyra-birch-post-imported > .ab-item{'
+            . 'background:#2271b1;color:#fff;font-weight:600;}'
+            . '#wpadminbar #wp-admin-bar-veyra-birch-post-imported:hover > .ab-item,'
+            . '#wpadminbar #wp-admin-bar-veyra-birch-post-imported.hover > .ab-item,'
+            . '#wpadminbar #wp-admin-bar-veyra-birch-post-imported > .ab-item:focus{'
+            . 'background:#135e96;color:#fff;}'
             . '</style>';
     }
 
@@ -758,6 +767,19 @@ class Veyra {
                 'href'   => admin_url('admin.php?page=' . $item[1]),
             ));
         }
+
+        // Standalone top-level shortcut straight to the Birch post importer, so
+        // it takes one click instead of opening the Veyra Hub 1 dropdown first.
+        // Styled blue/white in veyra_admin_bar_styles(). The edit_posts check at
+        // the top of this method already covers the importer screen's own cap.
+        $wp_admin_bar->add_node(array(
+            'id'    => 'veyra-birch-post-imported',
+            'title' => 'Birch Post Imported',
+            'href'  => admin_url('admin.php?page=veyra_post_importer'),
+            'meta'  => array(
+                'title' => 'Open the Veyra Post Importer From Birch screen',
+            ),
+        ));
     }
     
     public function enqueue_scripts() {
