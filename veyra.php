@@ -3,7 +3,7 @@
  * Plugin Name: Veyra
  * Plugin URI: https://github.com/transatlanticvoyage/veyra
  * Description: Veyra WordPress plugin.
- * Version: 1.2.0
+ * Version: 1.2.1
  * Author: Veyra Team
  * License: GPL v2 or later
  */
@@ -17,7 +17,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants
-define('VEYRA_PLUGIN_VERSION', '1.2.0');
+define('VEYRA_PLUGIN_VERSION', '1.2.1');
 define('VEYRA_PLUGIN_PATH', plugin_dir_path(__FILE__));
 define('VEYRA_PLUGIN_URL', plugin_dir_url(__FILE__));
 

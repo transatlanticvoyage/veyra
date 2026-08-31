@@ -163,13 +163,22 @@ function veyra_plugin_manager_ajax_update_github() {
 
     if (isset($result['error'])) {
         wp_send_json_error($result['error']);
-    } else {
-        if (function_exists('wp_cache_delete')) {
-            wp_cache_delete('plugins', 'plugins');
-        }
-        delete_site_transient('update_plugins');
-        wp_send_json_success($result['message']);
     }
+
+    if (function_exists('wp_cache_delete')) {
+        wp_cache_delete('plugins', 'plugins');
+    }
+    delete_site_transient('update_plugins');
+
+    // Re-read the plugin header straight off disk. The folder has already been
+    // swapped, so this reports the version that is now installed, letting the
+    // page refresh its own numbers without a reload.
+    $new_info = veyra_plugin_manager_self_info();
+
+    wp_send_json_success(array(
+        'message' => $result['message'],
+        'version' => $new_info['version'],
+    ));
 }
 
 /* ---------------------------------------------------------------------------
@@ -214,6 +223,15 @@ function veyra_plugin_manager_render_page() {
         </h1>
         <p style="color: #666; margin: 0 0 20px 0;">Manage the Veyra plugin and update it from GitHub.</p>
 
+        <!-- Persistent result banner for "Update From Github". Stays on screen
+             until dismissed or the page is navigated away from. -->
+        <div id="veyra-pm-banner" style="display: none; position: relative; margin: 0 0 16px 0; padding: 12px 42px 12px 14px; border: 1px solid transparent; border-left-width: 4px; border-radius: 4px; font-size: 14px; line-height: 1.5;">
+            <strong id="veyra-pm-banner-title"></strong>
+            <span id="veyra-pm-banner-text"></span>
+            <button type="button" id="veyra-pm-banner-dismiss" aria-label="Dismiss this notice"
+                    style="position: absolute; top: 8px; right: 10px; padding: 0; background: none; border: 0; color: inherit; opacity: 0.55; font-size: 18px; line-height: 1; cursor: pointer;">&times;</button>
+        </div>
+
         <?php if ($host_blocked): ?>
             <div class="notice notice-warning inline" style="margin: 0 0 16px 0;">
                 <p><strong>Local environment detected.</strong> "Update From Github" is disabled here for safety. It will run on live (non-local) sites only.</p>
@@ -239,14 +257,14 @@ function veyra_plugin_manager_render_page() {
                         <strong><?php echo esc_html($info['name']); ?></strong>
                     </td>
                     <td style="border: 1px solid #555; padding: 8px;">
-                        <?php echo esc_html($info['version']); ?>
+                        <span class="veyra-pm-local-version"><?php echo esc_html($info['version']); ?></span>
                     </td>
                     <td style="border: 1px solid #555; padding: 8px;">
                         <span class="status-badge <?php echo $is_active ? 'active' : 'inactive'; ?>">
                             <?php echo $is_active ? 'Active' : 'Inactive'; ?>
                         </span>
                     </td>
-                    <td style="border: 1px solid #555; padding: 8px;">
+                    <td style="border: 1px solid #555; padding: 8px;" id="veyra-pm-update-available">
                         <?php
                         if ($remote_error) {
                             echo '<span style="color:#888;" title="' . esc_attr($remote_error) . '">unknown</span>';
@@ -310,11 +328,11 @@ function veyra_plugin_manager_render_page() {
                         <?php if ($remote_version): ?>
                             <span style="font-size: 12px;">
                                 Remote: <strong><?php echo esc_html($remote_version); ?></strong><br>
-                                Local: <strong><?php echo esc_html($info['version']); ?></strong>
+                                Local: <strong class="veyra-pm-local-version"><?php echo esc_html($info['version']); ?></strong>
                             </span>
                         <?php else: ?>
                             <span style="font-size: 12px; color: #888;">
-                                Local: <strong><?php echo esc_html($info['version']); ?></strong><br>
+                                Local: <strong class="veyra-pm-local-version"><?php echo esc_html($info['version']); ?></strong><br>
                                 <em>remote unavailable</em>
                             </span>
                         <?php endif; ?>
@@ -354,6 +372,28 @@ function veyra_plugin_manager_render_page() {
 
     <script>
     jQuery(document).ready(function($) {
+        const VEYRA_BANNER_COLORS = {
+            success: { bg: '#edfaef', border: '#00a32a', text: '#0f5132' },
+            error:   { bg: '#fcf0f1', border: '#d63638', text: '#842029' }
+        };
+
+        // Persistent inline banner used instead of alert() for update results.
+        function veyraShowBanner(type, title, text) {
+            const c = VEYRA_BANNER_COLORS[type] || VEYRA_BANNER_COLORS.success;
+            $('#veyra-pm-banner-title').text(title ? title + ' ' : '');
+            $('#veyra-pm-banner-text').text(text || '');
+            $('#veyra-pm-banner').css({
+                'background': c.bg,
+                'border-color': c.border,
+                'color': c.text
+            }).show();
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        $('#veyra-pm-banner-dismiss').on('click', function() {
+            $('#veyra-pm-banner').hide();
+        });
+
         $('#veyra-sitemap-shortcode-copy').on('click', function() {
             const $field = $('#veyra-sitemap-shortcode-field');
             const $btn = $(this);
@@ -454,9 +494,8 @@ function veyra_plugin_manager_render_page() {
                     }
                 });
             } else if (action === 'update-github') {
-                if (!confirm('Update the Veyra plugin from GitHub?')) {
-                    return;
-                }
+                // No confirmation prompt — the click runs the update immediately.
+                $('#veyra-pm-banner').hide();
                 $button.prop('disabled', true).text('Updating...');
                 $.post(ajaxurl, {
                     action: 'veyra_update_from_github',
@@ -464,14 +503,24 @@ function veyra_plugin_manager_render_page() {
                     nonce: '<?php echo esc_js(wp_create_nonce('veyra_plugin_update')); ?>'
                 }).done(function(response) {
                     if (response.success) {
-                        alert('Veyra updated successfully from GitHub!');
-                        setTimeout(function() { location.reload(); }, 500);
+                        const data = response.data || {};
+                        let text = data.message || 'Plugin updated successfully from GitHub.';
+                        if (data.version) {
+                            text += ' Now running version ' + data.version + '.';
+                            // Refresh the on-page numbers so no reload is needed.
+                            $('.veyra-pm-local-version').text(data.version);
+                            $('#veyra-pm-update-available').html('<span style="color: #00a32a;">No</span>');
+                        }
+                        veyraShowBanner('success', 'Success:', text);
                     } else {
-                        alert('Error: ' + response.data);
-                        $button.prop('disabled', false).text('Update From Github');
+                        const msg = (typeof response.data === 'string' && response.data)
+                            ? response.data
+                            : 'The server rejected the update but gave no reason.';
+                        veyraShowBanner('error', 'Update failed:', msg);
                     }
-                }).fail(function() {
-                    alert('Update failed. Please try again.');
+                    $button.prop('disabled', false).text('Update From Github');
+                }).fail(function(xhr) {
+                    veyraShowBanner('error', 'Update failed:', 'The request did not complete (HTTP ' + (xhr && xhr.status ? xhr.status : 0) + '). The plugin may have been left partially updated — check the version above before retrying.');
                     $button.prop('disabled', false).text('Update From Github');
                 });
             }
