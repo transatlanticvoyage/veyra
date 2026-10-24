@@ -3203,6 +3203,9 @@ class Veyra {
             #veyra-copied-pop .veyra-copied-head { font-size: 20px; font-weight: 700; color: #2271b1; }
             #veyra-copied-pop .veyra-copied-val { margin-top: 4px; font-size: 14px; color: #00a32a; }
             .veyra-lsyn-url a { text-decoration: none; }
+            /* URL text at 1.5x the mini-table's 11px. Needs (0,2,2) to beat the
+               "table.veyra-lsyn-tbl td" font-size rule above. */
+            table.veyra-lsyn-tbl td.veyra-lsyn-url { font-size: 16.5px; }
             /* Guarantees one line per link: the value ellipsises inside its own box
                while the ⓘ stays outside it and can never be clipped away. */
             .veyra-lsyn-val {
