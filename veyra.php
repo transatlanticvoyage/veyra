@@ -3702,7 +3702,10 @@ class Veyra {
                 font-size: 11px; font-weight: 600; line-height: 1; cursor: pointer; border-radius: 0;
             }
             .veyra-ds-tab { padding: 4px 10px; }
-            .veyra-ds-btn { padding: 6px 10px; min-width: 42px; }
+            /* nowrap + no grow/shrink: the Title column can be narrow, and a wrapped
+               "NO/W" or "7-/12" is unreadable. */
+            .veyra-ds-tab, .veyra-ds-btn { white-space: nowrap; flex: 0 0 auto; }
+            .veyra-ds-btn { padding: 6px 7px; min-width: 0; }
             .veyra-ds-tab + .veyra-ds-tab, .veyra-ds-btn + .veyra-ds-btn { border-left-width: 0; }
             .veyra-ds-tab:first-child, .veyra-ds-btn:first-child { border-radius: 3px 0 0 3px; }
             .veyra-ds-tab:last-child,  .veyra-ds-btn:last-child  { border-radius: 0 3px 3px 0; }
@@ -3796,7 +3799,9 @@ class Veyra {
             function openFor(trigger){
                 if (!panel) buildPanel();
                 keep();
-                var td = trigger.closest('td');
+                // closest('td, th'): current WordPress renders the primary (Title) cell as a
+                // <th scope="row">, so looking for a <td> alone finds nothing.
+                var td = trigger.closest('td, th');
                 if (!td) return;
                 if (current !== trigger) {
                     current = trigger;
