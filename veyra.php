@@ -2896,7 +2896,20 @@ class Veyra {
             /* A percentage, not a fixed 360px: the posts list is table-layout:fixed,
                so a pixel width is taken off the top and the Title column absorbs the
                entire loss. A percentage shares the squeeze with the other columns. */
-            .fixed .column-veyra_lsyn { width: 20%; }
+            /* 40% (was 20%): doubles the visible URL text before it ellipsises. The
+               URL sub-column is what's left after the 44px nf column and the 40%
+               anchor, so doubling the outer width more than doubles it. */
+            .fixed .column-veyra_lsyn { width: 40%; }
+            /* Box every header cell on all 4 sides. The checkbox header is a <td>,
+               not a <th>, in core's markup, so it's included to keep the row whole.
+               widefat tables use separate borders, so neighbours drop their left
+               edge to avoid a doubled 2px line between cells. */
+            .wp-list-table thead th,
+            .wp-list-table thead td,
+            .wp-list-table tfoot th,
+            .wp-list-table tfoot td { border: 1px solid #c3c4c7; }
+            .wp-list-table thead tr > * + *,
+            .wp-list-table tfoot tr > * + * { border-left-width: 0; }
             /* Title deliberately gets NO width rule. In a fixed-layout table the space
                freed by the hidden columns is handed to the column that has no declared
                width — so Title (and Date, at core's 14%) absorb all of it. Pinning srro
