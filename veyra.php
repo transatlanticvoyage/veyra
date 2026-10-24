@@ -3128,7 +3128,7 @@ class Veyra {
             /* 40% (was 20%): doubles the visible URL text before it ellipsises. The
                URL sub-column is what's left after the 44px nf column and the 40%
                anchor, so doubling the outer width more than doubles it. */
-            .fixed .column-veyra_lsyn { width: 40%; }
+            .fixed .column-veyra_lsyn { width: 29%; }
             /* Box every header cell on all 4 sides. The checkbox header is a <td>,
                not a <th>, in core's markup, so it's included to keep the row whole.
                widefat tables use separate borders, so neighbours drop their left
@@ -3139,10 +3139,16 @@ class Veyra {
             .wp-list-table tfoot td { border: 1px solid #c3c4c7; }
             .wp-list-table thead tr > * + *,
             .wp-list-table tfoot tr > * + * { border-left-width: 0; }
-            /* Title deliberately gets NO width rule. In a fixed-layout table the space
-               freed by the hidden columns is handed to the column that has no declared
-               width — so Title (and Date, at core's 14%) absorb all of it. Pinning srro
-               and the checkbox stops them soaking up leftover instead of Title. */
+            /* Title gets an explicit share. It used to get no width rule and live off
+               whatever was left over, but once link_synopsis (then 40%), boldcrypted
+               (16%), Date (core 14%) and the px columns added up past the table width,
+               "left over" was 0px and Title wrapped one character per line. Percent
+               columns now total 64% (Title 18 + link_synopsis 29 + boldcrypted 10 +
+               Date 7), leaving the rest for the px columns and cell padding at ~1700px.
+               Narrower windows scroll sideways instead of crushing Title; rocket_chamber
+               Cols/page can trim columns. */
+            .fixed .column-title { width: 18%; }
+            .fixed .column-date { width: 7%; }
             .fixed .column-veyra_srro,
             .fixed .column-veyra_sroh { width: 90px; }
             .fixed .check-column { width: 2.2em; }
@@ -4260,7 +4266,7 @@ class Veyra {
         $last_label = $last ? 'last scan: ' . wp_date('Y-m-d H:i', $last) : 'never scanned';
         ?>
         <style>
-            .fixed .column-veyra_bc { width: 16%; }
+            .fixed .column-veyra_bc { width: 10%; }
             .veyra-bc-th { font-weight: 700; }
             .veyra-bc b { font-weight: 700; }
             /* One colour per kind; state names and postal codes share theirs. */
@@ -4380,7 +4386,6 @@ class Veyra {
             'total'      => (int) $wp_list_table->get_pagination_arg('total_items'),
             'totalPages' => max(1, (int) $wp_list_table->get_pagination_arg('total_pages')),
             'page'       => max(1, (int) $wp_list_table->get_pagenum()),
-            'onPage'     => is_array($wp_list_table->items) ? count($wp_list_table->items) : 0,
         );
         $nonce = wp_create_nonce('veyra_elephant_tools');
         ?>
@@ -4430,6 +4435,9 @@ class Veyra {
             var AJAX_URL = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
             var NONCE = <?php echo wp_json_encode($nonce); ?>;
             var S = <?php echo wp_json_encode($state); ?>;
+            // Counted from the DOM: the posts list table never fills ->items (it
+            // renders from the global $wp_query), so the server can't report it.
+            S.onPage = document.querySelectorAll('#the-list tr[id^="post-"]').length;
             var STICKY = ['cb', 'title'];
             var ROW_SIZES = [10, 25, 50, 100, 200, 'All'];
             var COL_SIZES = [6, 8, 10, 12, 15];
