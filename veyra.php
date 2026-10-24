@@ -189,6 +189,12 @@ class Veyra {
         // own "DRAFTS" separator row, drawn by veyra_reading_controls_footer_assets().
         add_filter('posts_orderby', array($this, 'veyra_drafts_first_orderby'), 10, 2);
 
+        // "Date Switch" row action (after Preview) on the Posts list: hover reveals
+        // a panel of random-date buttons in Fast / Medium / Slow interval sets.
+        add_filter('post_row_actions', array($this, 'veyra_ds_row_action'), 10, 2);
+        add_action('wp_ajax_veyra_date_switch', array($this, 'ajax_date_switch'));
+        add_action('admin_footer-edit.php', array($this, 'veyra_ds_footer_assets'));
+
         // "link_synopsis" column on the native Posts list screen (edit.php).
         // Leftmost column: a compact per-post table of the OUTBOUND links found in
         // that post's post_content. Backed by post meta ('_veyra_link_synopsis')
@@ -3550,6 +3556,343 @@ class Veyra {
         return "({$wpdb->posts}.post_status = 'draft') DESC" . ($orderby !== '' ? ', ' . $orderby : '');
     }
 
+    /* ---------------------------------------------------------------------
+     * Date Switch (Posts list row action)
+     *
+     * Each button asks the server for a random post_date (to the second) inside
+     * a day range relative to NOW — e.g. 2–4 days ago, or 4–7 days ahead. The
+     * random pick happens server-side so it's anchored to the site's clock and
+     * timezone, not the browser's.
+     *
+     * Saved through wp_update_post() so it behaves exactly like editing the date
+     * in Quick Edit: a published post given a future date becomes Scheduled, a
+     * scheduled post given a past date publishes, drafts stay drafts. Every
+     * save_post handler in this plugin bails without its own editor nonce, so an
+     * AJAX save can't disturb their data, and transition_post_status still fires
+     * for the auto-calibrate hooks.
+     * ------------------------------------------------------------------- */
+
+    /** post_row_actions: add "Date Switch" right after Preview / View. */
+    public function veyra_ds_row_action($actions, $post) {
+        if (!($post instanceof WP_Post) || $post->post_type !== 'post' || !current_user_can('edit_post', $post->ID)) {
+            return $actions;
+        }
+        $actions['veyra_date_switch'] = sprintf(
+            '<a href="#" class="veyra-ds-trigger" data-post="%d" role="button" aria-haspopup="true">Date Switch</a>',
+            (int) $post->ID
+        );
+        return $actions;
+    }
+
+    /**
+     * AJAX: set a post's date.
+     *   kind=now                         current site time
+     *   kind=range, dir=past|future,
+     *       min=<days>, max=<days>      random second inside that window
+     *   kind=exact, value=Y-m-dTH:i     a picked date, seconds randomized
+     */
+    public function ajax_date_switch() {
+        check_ajax_referer('veyra_elephant_tools', 'nonce');
+        $post_id = isset($_POST['post_id']) ? intval($_POST['post_id']) : 0;
+        $post    = $post_id ? get_post($post_id) : null;
+        if (!$post || $post->post_type !== 'post') {
+            wp_send_json_error('Invalid post id');
+        }
+        if (!current_user_can('edit_post', $post_id)) {
+            wp_send_json_error('Unauthorized');
+        }
+
+        $kind = isset($_POST['kind']) ? sanitize_key($_POST['kind']) : '';
+        $now  = current_time('timestamp'); // site-local "timestamp", matches post_date
+        if ($kind === 'now') {
+            $ts = $now;
+        } elseif ($kind === 'range') {
+            $min = isset($_POST['min']) ? floatval($_POST['min']) : 0;
+            $max = isset($_POST['max']) ? floatval($_POST['max']) : 0;
+            if ($min < 0 || $max <= $min || $max > 3650) {
+                wp_send_json_error('Invalid range');
+            }
+            $offset = wp_rand((int) round($min * DAY_IN_SECONDS), (int) round($max * DAY_IN_SECONDS));
+            $ts = (isset($_POST['dir']) && $_POST['dir'] === 'past') ? $now - $offset : $now + $offset;
+        } elseif ($kind === 'exact') {
+            $value = isset($_POST['value']) ? sanitize_text_field(wp_unslash($_POST['value'])) : '';
+            if (!preg_match('/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/', $value, $m)
+                || !checkdate((int) $m[2], (int) $m[3], (int) $m[1]) || (int) $m[4] > 23 || (int) $m[5] > 59) {
+                wp_send_json_error('Invalid date');
+            }
+            $ts = gmmktime((int) $m[4], (int) $m[5], wp_rand(0, 59), (int) $m[2], (int) $m[3], (int) $m[1]);
+        } else {
+            wp_send_json_error('Invalid kind');
+        }
+
+        $new_date = gmdate('Y-m-d H:i:s', $ts);
+        $res = wp_update_post(array(
+            'ID'            => $post_id,
+            'post_date'     => $new_date,
+            'post_date_gmt' => get_gmt_from_date($new_date),
+            'edit_date'     => true,
+        ), true);
+        if (is_wp_error($res)) {
+            wp_send_json_error($res->get_error_message());
+        }
+
+        $post   = get_post($post_id);
+        $labels = array('publish' => 'Published', 'future' => 'Scheduled');
+        $label  = isset($labels[$post->post_status]) ? $labels[$post->post_status] : 'Last Modified';
+        wp_send_json_success(array(
+            'post_id' => $post_id,
+            'date'    => $post->post_date,
+            'status'  => $post->post_status,
+            'label'   => $label,
+            'display' => sprintf(
+                '%s at %s',
+                mysql2date(get_option('date_format'), $post->post_date),
+                mysql2date(get_option('time_format'), $post->post_date)
+            ),
+        ));
+    }
+
+    /** CSS + JS for the Date Switch panel, Posts list screen only. */
+    public function veyra_ds_footer_assets() {
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+        if (!$screen || $screen->base !== 'edit' || $screen->post_type !== 'post') {
+            return;
+        }
+        $nonce = wp_create_nonce('veyra_elephant_tools');
+        // Each mode: one past range, NOW, three future ranges. Medium ≈ 2× Fast,
+        // Slow ≈ 2× Medium.
+        $modes = array(
+            'fast'   => array('label' => 'Fast Mode', 'past' => array(2, 4),  'future' => array(array(2, 4),  array(4, 7),   array(7, 12))),
+            'medium' => array('label' => 'Medium',    'past' => array(4, 8),  'future' => array(array(4, 8),  array(8, 14),  array(14, 24))),
+            'slow'   => array('label' => 'Slow',      'past' => array(8, 16), 'future' => array(array(8, 16), array(16, 28), array(28, 48))),
+        );
+        // "Cus." dropdown: wider windows, mostly further out.
+        $custom = array(
+            'future' => array(array(12, 20), array(20, 30), array(30, 45), array(45, 60), array(60, 90), array(90, 120), array(120, 180), array(180, 270), array(270, 365)),
+            'past'   => array(array(4, 7), array(7, 14), array(14, 30), array(30, 60), array(60, 120), array(120, 365)),
+        );
+        ?>
+        <style>
+            .veyra-ds-panel {
+                display: none; margin-top: 4px; padding: 6px; background: #fff;
+                border: 1px solid #c3c4c7; border-radius: 3px; box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+                position: relative; z-index: 5;
+            }
+            .veyra-ds-panel.is-open { display: block; }
+            .veyra-ds-tabs, .veyra-ds-btns { display: flex; }
+            .veyra-ds-tabs { margin-bottom: 5px; }
+            /* Joined: neighbours share one border, no gap. */
+            .veyra-ds-tab, .veyra-ds-btn {
+                margin: 0; border: 1px solid #8c8f94; background: #f6f7f7; color: #2c3338;
+                font-size: 11px; font-weight: 600; line-height: 1; cursor: pointer; border-radius: 0;
+            }
+            .veyra-ds-tab { padding: 4px 10px; }
+            .veyra-ds-btn { padding: 6px 10px; min-width: 42px; }
+            .veyra-ds-tab + .veyra-ds-tab, .veyra-ds-btn + .veyra-ds-btn { border-left-width: 0; }
+            .veyra-ds-tab:first-child, .veyra-ds-btn:first-child { border-radius: 3px 0 0 3px; }
+            .veyra-ds-tab:last-child,  .veyra-ds-btn:last-child  { border-radius: 0 3px 3px 0; }
+            .veyra-ds-tab.is-active { background: #2271b1; border-color: #2271b1; color: #fff; }
+            .veyra-ds-btn:hover { background: #e5f0fa; }
+            .veyra-ds-btn.is-past { color: #8a4b00; }
+            .veyra-ds-btn.is-now  { color: #00701c; }
+            .veyra-ds-btn.is-future { color: #135e96; }
+            .veyra-ds-btn.is-busy, .veyra-ds-panel.is-busy .veyra-ds-btn { opacity: 0.5; cursor: wait; }
+            .veyra-ds-status { margin-top: 5px; font-size: 11px; font-weight: 600; min-height: 1em; }
+            /* position:fixed so it isn't clipped by the list table. */
+            .veyra-ds-drop {
+                display: none; position: fixed; z-index: 100015; min-width: 190px; max-height: 340px; overflow-y: auto;
+                background: #fff; border: 1px solid #8c8f94; border-radius: 4px; box-shadow: 0 6px 18px rgba(0,0,0,0.2);
+                padding: 4px 0; font-size: 12px;
+            }
+            .veyra-ds-drop.is-open { display: block; }
+            .veyra-ds-drop-h { padding: 4px 10px 2px; font-size: 10px; font-weight: 700; text-transform: uppercase; color: #646970; }
+            .veyra-ds-drop-item { display: block; width: 100%; text-align: left; padding: 4px 12px; border: 0; background: none; cursor: pointer; font-size: 12px; }
+            .veyra-ds-drop-item:hover { background: #2271b1; color: #fff; }
+            .veyra-ds-drop-exact { display: flex; gap: 4px; padding: 6px 10px 4px; border-top: 1px solid #dcdcde; margin-top: 4px; }
+            .veyra-ds-drop-exact input { font-size: 12px; min-height: 26px; flex: 1; }
+        </style>
+        <script>
+        (function(){
+            var AJAX_URL = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+            var NONCE = <?php echo wp_json_encode($nonce); ?>;
+            var MODES = <?php echo wp_json_encode($modes); ?>;
+            var CUSTOM = <?php echo wp_json_encode($custom); ?>;
+            var mode = 'fast';
+            try { var saved = localStorage.getItem('veyra_ds_mode'); if (saved && MODES[saved]) mode = saved; } catch (e) {}
+
+            var panel = null, drop = null, current = null, hideTimer = null, dropTimer = null;
+
+            function btnHtml(cls, attrs, label, title){
+                return '<button type="button" class="veyra-ds-btn ' + cls + '" ' + attrs + ' title="' + title + '">' + label + '</button>';
+            }
+            function renderButtons(){
+                var m = MODES[mode], h = '';
+                h += btnHtml('is-past', 'data-kind="range" data-dir="past" data-min="' + m.past[0] + '" data-max="' + m.past[1] + '"',
+                             m.past[0] + '-' + m.past[1], 'random time ' + m.past[0] + '–' + m.past[1] + ' days ago');
+                h += btnHtml('is-now', 'data-kind="now"', 'NOW', 'right now');
+                m.future.forEach(function(r){
+                    h += btnHtml('is-future', 'data-kind="range" data-dir="future" data-min="' + r[0] + '" data-max="' + r[1] + '"',
+                                 r[0] + '-' + r[1], 'random time ' + r[0] + '–' + r[1] + ' days from now');
+                });
+                h += btnHtml('veyra-ds-custom', '', 'Cus.', 'more ranges / pick a date');
+                panel.querySelector('.veyra-ds-btns').innerHTML = h;
+                panel.querySelectorAll('.veyra-ds-tab').forEach(function(t){
+                    t.classList.toggle('is-active', t.getAttribute('data-mode') === mode);
+                });
+            }
+            function buildPanel(){
+                panel = document.createElement('div');
+                panel.className = 'veyra-ds-panel';
+                var tabs = '';
+                Object.keys(MODES).forEach(function(k){
+                    tabs += '<button type="button" class="veyra-ds-tab" data-mode="' + k + '">' + MODES[k].label + '</button>';
+                });
+                panel.innerHTML = '<div class="veyra-ds-tabs">' + tabs + '</div><div class="veyra-ds-btns"></div><div class="veyra-ds-status"></div>';
+                renderButtons();
+
+                drop = document.createElement('div');
+                drop.className = 'veyra-ds-drop';
+                var d = '<div class="veyra-ds-drop-h">Future</div>';
+                CUSTOM.future.forEach(function(r){
+                    d += '<button type="button" class="veyra-ds-drop-item" data-kind="range" data-dir="future" data-min="' + r[0] + '" data-max="' + r[1] + '">' + r[0] + '–' + r[1] + ' days ahead</button>';
+                });
+                d += '<div class="veyra-ds-drop-h">Past</div>';
+                CUSTOM.past.forEach(function(r){
+                    d += '<button type="button" class="veyra-ds-drop-item" data-kind="range" data-dir="past" data-min="' + r[0] + '" data-max="' + r[1] + '">' + r[0] + '–' + r[1] + ' days ago</button>';
+                });
+                d += '<div class="veyra-ds-drop-exact"><input type="datetime-local" class="veyra-ds-exact-val"><button type="button" class="button button-small veyra-ds-exact-go">Set</button></div>';
+                drop.innerHTML = d;
+                document.body.appendChild(drop);
+
+                [panel, drop].forEach(function(el){
+                    el.addEventListener('mouseenter', keep);
+                    el.addEventListener('mouseleave', scheduleHide);
+                });
+                panel.addEventListener('click', onPanelClick);
+                drop.addEventListener('click', onDropClick);
+                panel.addEventListener('mouseover', function(e){
+                    if (e.target.closest('.veyra-ds-custom')) { openDrop(e.target.closest('.veyra-ds-custom')); }
+                    else if (e.target.closest('.veyra-ds-btn, .veyra-ds-tab')) { scheduleDropHide(); }
+                });
+                drop.addEventListener('mouseenter', function(){ clearTimeout(dropTimer); });
+                drop.addEventListener('mouseleave', scheduleDropHide);
+            }
+
+            function openFor(trigger){
+                if (!panel) buildPanel();
+                keep();
+                var td = trigger.closest('td');
+                if (!td) return;
+                if (current !== trigger) {
+                    current = trigger;
+                    panel.setAttribute('data-post', trigger.getAttribute('data-post'));
+                    panel.querySelector('.veyra-ds-status').textContent = '';
+                    closeDrop();
+                    // Directly below the row-actions bar, full width of the cell.
+                    var bar = trigger.closest('.row-actions');
+                    (bar || td.lastElementChild).insertAdjacentElement('afterend', panel);
+                }
+                panel.classList.add('is-open');
+            }
+            function keep(){ clearTimeout(hideTimer); }
+            function scheduleHide(){
+                clearTimeout(hideTimer);
+                hideTimer = setTimeout(function(){
+                    if (panel && panel.classList.contains('is-busy')) return;
+                    if (panel) panel.classList.remove('is-open');
+                    closeDrop();
+                    current = null;
+                }, 350);
+            }
+            function openDrop(btn){
+                clearTimeout(dropTimer);
+                var r = btn.getBoundingClientRect();
+                drop.classList.add('is-open');
+                var h = drop.offsetHeight;
+                var top = r.bottom + 2;
+                if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 2);
+                drop.style.top = top + 'px';
+                drop.style.left = Math.min(r.left, window.innerWidth - drop.offsetWidth - 8) + 'px';
+            }
+            function closeDrop(){ if (drop) drop.classList.remove('is-open'); }
+            function scheduleDropHide(){
+                clearTimeout(dropTimer);
+                dropTimer = setTimeout(closeDrop, 300);
+            }
+
+            function onPanelClick(e){
+                e.preventDefault();
+                var tab = e.target.closest('.veyra-ds-tab');
+                if (tab) {
+                    mode = tab.getAttribute('data-mode');
+                    try { localStorage.setItem('veyra_ds_mode', mode); } catch (err) {}
+                    renderButtons();
+                    return;
+                }
+                var b = e.target.closest('.veyra-ds-btn');
+                if (!b) return;
+                if (b.classList.contains('veyra-ds-custom')) { openDrop(b); return; }
+                apply(b.dataset);
+            }
+            function onDropClick(e){
+                var item = e.target.closest('.veyra-ds-drop-item');
+                if (item) { e.preventDefault(); closeDrop(); apply(item.dataset); return; }
+                if (e.target.closest('.veyra-ds-exact-go')) {
+                    e.preventDefault();
+                    var v = drop.querySelector('.veyra-ds-exact-val').value;
+                    if (!v) return;
+                    closeDrop();
+                    apply({ kind: 'exact', value: v });
+                }
+            }
+
+            function apply(spec){
+                if (!panel || panel.classList.contains('is-busy')) return;
+                var postId = panel.getAttribute('data-post');
+                var status = panel.querySelector('.veyra-ds-status');
+                panel.classList.add('is-busy');
+                status.style.color = '#787c82'; status.textContent = 'saving…';
+                var body = new URLSearchParams();
+                body.append('action', 'veyra_date_switch');
+                body.append('nonce', NONCE);
+                body.append('post_id', postId);
+                ['kind', 'dir', 'min', 'max', 'value'].forEach(function(k){ if (spec[k] !== undefined) body.append(k, spec[k]); });
+                fetch(AJAX_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+                    .then(function(r){ return r.json(); })
+                    .then(function(res){
+                        if (!res || !res.success) throw new Error((res && res.data) ? res.data : 'save failed');
+                        var d = res.data;
+                        status.style.color = '#00701c';
+                        status.textContent = '✓ ' + d.date + ' — ' + d.label;
+                        var row = document.getElementById('post-' + d.post_id);
+                        if (row) {
+                            var cell = row.querySelector('td.column-date');
+                            if (cell) { cell.innerHTML = ''; cell.appendChild(document.createTextNode(d.label)); cell.appendChild(document.createElement('br')); cell.appendChild(document.createTextNode(d.display)); }
+                            row.className = row.className.replace(/\bstatus-\S+/, 'status-' + d.status);
+                        }
+                    })
+                    .catch(function(err){ status.style.color = '#dc3232'; status.textContent = err.message; })
+                    .finally(function(){ panel.classList.remove('is-busy'); });
+            }
+
+            document.addEventListener('mouseover', function(e){
+                var t = e.target.closest ? e.target.closest('.veyra-ds-trigger') : null;
+                if (t) openFor(t);
+            });
+            document.addEventListener('mouseout', function(e){
+                var t = e.target.closest ? e.target.closest('.veyra-ds-trigger') : null;
+                if (t && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest('.veyra-ds-trigger'))) scheduleHide();
+            });
+            // Click opens it too (touch screens, keyboard).
+            document.addEventListener('click', function(e){
+                var t = e.target.closest ? e.target.closest('.veyra-ds-trigger') : null;
+                if (t) { e.preventDefault(); openFor(t); }
+            });
+        })();
+        </script>
+        <?php
+    }
+
     /** AJAX: save the "Blog pages show at most" setting (posts_per_page). */
     public function ajax_save_posts_per_page() {
         check_ajax_referer('veyra_elephant_tools', 'nonce');
@@ -3630,7 +3973,7 @@ class Veyra {
                 background: #b45309; color: #fff; font-weight: 700; letter-spacing: 0.02em;
                 font-size: 12px; text-transform: uppercase;
             }
-            tr.veyra-drafts-separator.is-end td { background: #4b5563; }
+            tr.veyra-drafts-separator.is-end td { background: #4b5563; text-transform: none; }
             tr.veyra-rolloff-separator td {
                 height: 20px; line-height: 20px; padding: 0 10px;
                 background: #111827; color: #fff; font-weight: 700; letter-spacing: 0.02em;
@@ -3941,7 +4284,7 @@ class Veyra {
                 }
                 tbody.insertBefore(sep('DRAFTS (' + drafts + ' on this page)'), rows[0]);
                 if (drafts < rows.length) {
-                    tbody.insertBefore(sep('ALL OTHER POSTS BELOW', 'is-end'), rows[drafts]);
+                    tbody.insertBefore(sep('Posts On Home Page', 'is-end'), rows[drafts]);
                 }
             }
 
