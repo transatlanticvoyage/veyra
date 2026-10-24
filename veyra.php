@@ -198,6 +198,9 @@ class Veyra {
         add_action('wp_ajax_veyra_lsyn_start', array($this, 'ajax_lsyn_start'));
         add_action('wp_ajax_veyra_lsyn_scan_batch', array($this, 'ajax_lsyn_scan_batch'));
         add_action('wp_ajax_veyra_lsyn_finish', array($this, 'ajax_lsyn_finish'));
+        // MS (money site) toggle on each link_synopsis row. Site-wide, keyed by the
+        // link's registrable domain — see VEYRA_MONEY_SITES_OPTION.
+        add_action('wp_ajax_veyra_toggle_money_site', array($this, 'ajax_toggle_money_site'));
         add_action('admin_footer-edit.php', array($this, 'veyra_lsyn_footer_assets'));
         add_filter('default_hidden_columns', array($this, 'veyra_lsyn_default_hidden_columns'), 10, 2);
     }
@@ -2571,6 +2574,48 @@ class Veyra {
     const VEYRA_LSYN_BATCH_SIZE = 25;
 
     /**
+     * "Money site" marks, toggled by hand with the MS button on link_synopsis rows.
+     *
+     * A money site is a property of the DESTINATION domain, not of any one link or
+     * post, so this is one site-wide { registrable_domain => 1 } map — the same
+     * shape as the should_remain_* flags. Marking it on any row marks every link to
+     * that domain (www. and subdomains included) across every post. Absent key =
+     * FALSE, so nothing to install.
+     */
+    const VEYRA_MONEY_SITES_OPTION = 'veyra_money_sites';
+
+    /** Request-level cache: the column renders once per row. */
+    private $veyra_money_sites_cache = null;
+
+    private function veyra_money_sites_map() {
+        if ($this->veyra_money_sites_cache === null) {
+            $this->veyra_money_sites_cache = $this->veyra_flag_get_map(self::VEYRA_MONEY_SITES_OPTION);
+        }
+        return $this->veyra_money_sites_cache;
+    }
+
+    /** AJAX: flip the money-site mark for a domain. POST domain=<host or registrable domain>. */
+    public function ajax_toggle_money_site() {
+        check_ajax_referer('veyra_elephant_tools', 'nonce');
+        if (!current_user_can('edit_posts')) {
+            wp_send_json_error('Unauthorized');
+        }
+        $domain = $this->veyra_lsyn_registrable_domain(isset($_POST['domain']) ? wp_unslash($_POST['domain']) : '');
+        if ($domain === '') {
+            wp_send_json_error('Invalid domain');
+        }
+        $map = $this->veyra_flag_get_map(self::VEYRA_MONEY_SITES_OPTION);
+        $new_on = empty($map[$domain]);
+        if ($new_on) {
+            $map[$domain] = 1;
+        } else {
+            unset($map[$domain]);
+        }
+        update_option(self::VEYRA_MONEY_SITES_OPTION, $map);
+        wp_send_json_success(array('domain' => $domain, 'on' => $new_on ? 1 : 0));
+    }
+
+    /**
      * Reduce a hostname to its registrable domain, so subdomains of this site count
      * as INTERNAL (blog.foo.com is not "outbound" from foo.com) and www./non-www are
      * the same thing. Covers the common multi-label public suffixes; this is a
@@ -2760,6 +2805,38 @@ class Veyra {
         );
     }
 
+    /**
+     * Same as veyra_lsyn_truncate_cell(), but the host is wrapped in its own span
+     * (.veyra-lsyn-host) so a money-site mark can bold just the domain portion.
+     * Truncation counts the whole URL, so a long host can itself be cut short.
+     *
+     * @return array { text, tip, host }
+     */
+    private function veyra_lsyn_url_cell($url, $limit) {
+        $url  = (string) $url;
+        $cut  = $this->veyra_lsyn_truncate_cell($url, $limit);
+        $host = (string) parse_url(strpos($url, '//') === 0 ? 'https:' . $url : $url, PHP_URL_HOST);
+        $cut['host'] = $host;
+        if ($host === '') {
+            return $cut;
+        }
+        // Byte offsets below; a non-ASCII URL keeps the plain (unbolded) cut rather
+        // than risk splitting a multibyte character, which esc_html() would blank.
+        $at = stripos($url, $host);
+        if ($at === false || $at >= $limit || preg_match('/[^\x00-\x7F]/', $url)) {
+            return $cut;
+        }
+        $len   = function_exists('mb_strlen') ? mb_strlen($url, 'UTF-8') : strlen($url);
+        $short = $len > $limit ? (function_exists('mb_substr') ? mb_substr($url, 0, $limit, 'UTF-8') : substr($url, 0, $limit)) : $url;
+        $pre   = substr($short, 0, $at);
+        $mid   = substr($short, $at, strlen($host));
+        $post  = (string) substr($short, $at + strlen($mid));
+        $cut['text'] = esc_html($pre)
+            . '<span class="veyra-lsyn-host">' . esc_html($mid) . '</span>'
+            . esc_html($post) . ($len > $limit ? '…' : '');
+        return $cut;
+    }
+
     /** Render the compact per-post links table inside our column's cell. */
     public function veyra_lsyn_render_column($column, $post_id) {
         if ($column !== 'veyra_lsyn') {
@@ -2775,22 +2852,37 @@ class Veyra {
             return;
         }
 
+        $money_map = $this->veyra_money_sites_map();
         echo '<table class="veyra-lsyn-tbl"><tbody>';
         foreach ($links as $link) {
             $nofollow = $this->veyra_lsyn_is_nofollow_value(isset($link['is_nofollow']) ? $link['is_nofollow'] : false);
             $anchor   = $this->veyra_lsyn_truncate_cell(isset($link['anchor']) ? $link['anchor'] : '', 26);
             $raw_url  = isset($link['target_url']) ? $link['target_url'] : '';
-            $url      = $this->veyra_lsyn_truncate_cell($raw_url, 32);
+            $url      = $this->veyra_lsyn_url_cell($raw_url, 64);
+            $reg      = $this->veyra_lsyn_registrable_domain($url['host']);
+            $money    = $reg !== '' && !empty($money_map[$reg]);
             // The value is wrapped in .veyra-lsyn-val (which does the ellipsis) while
             // the ⓘ sits outside it, so overflow clipping can never hide the icon.
+            // MS / D / C each get their own <td> so they line up down the column.
             printf(
                 '<tr><td class="veyra-lsyn-nf %s">%s</td>'
                 . '<td class="veyra-lsyn-anchor"><span class="veyra-lsyn-val">%s</span>%s</td>'
-                . '<td class="veyra-lsyn-url"><a class="veyra-lsyn-val" href="%s" target="_blank" rel="noopener noreferrer">%s</a>%s</td></tr>',
+                . '<td class="veyra-lsyn-bslot is-ms"><button type="button" class="veyra-lsyn-btn veyra-lsyn-ms%s" data-domain="%s" aria-pressed="%s" title="money site: %s">MS</button></td>'
+                . '<td class="veyra-lsyn-bslot"><button type="button" class="veyra-lsyn-btn veyra-lsyn-copy" data-copy="%s" title="copy domain">D</button></td>'
+                . '<td class="veyra-lsyn-bslot"><button type="button" class="veyra-lsyn-btn veyra-lsyn-copy" data-copy="%s" title="copy entire url">C</button></td>'
+                . '<td class="veyra-lsyn-url%s" data-domain="%s"><a class="veyra-lsyn-val" href="%s" target="_blank" rel="noopener noreferrer">%s</a>%s</td></tr>',
                 $nofollow ? 'is-nofollow' : 'is-follow',
                 $nofollow ? 'TRUE' : 'FALSE',
                 $anchor['text'],
                 $anchor['tip'],
+                $money ? ' is-on' : '',
+                esc_attr($reg),
+                $money ? 'true' : 'false',
+                $money ? 'TRUE' : 'FALSE',
+                esc_attr($url['host']),
+                esc_attr($raw_url),
+                $money ? ' is-money' : '',
+                esc_attr($reg),
                 esc_url($raw_url),
                 $url['text'],
                 $url['tip']
@@ -2946,7 +3038,33 @@ class Veyra {
             .veyra-lsyn-nf { width: 44px; text-align: center; font-weight: 600; }
             .veyra-lsyn-nf.is-nofollow { color: #b32d2e; }
             .veyra-lsyn-nf.is-follow { color: #2271b1; }
-            .veyra-lsyn-anchor { width: 40%; }
+            /* Fixed px, not a %: anchors are cut at 26 chars server-side, so a share
+               of a wide column just left dead space before the URL. ~26 chars at
+               11px plus the ⓘ. */
+            .veyra-lsyn-anchor { width: 170px; }
+            .veyra-lsyn-bslot { width: 20px; text-align: center; }
+            table.veyra-lsyn-tbl td.veyra-lsyn-bslot { padding: 0 3px 0 0; }
+            .veyra-lsyn-bslot.is-ms { width: 26px; }
+            .veyra-lsyn-btn {
+                display: inline-block; min-width: 18px; height: 15px; padding: 0 3px;
+                font-size: 9px; font-weight: 700; line-height: 13px; text-align: center;
+                border: 1px solid #8c8f94; border-radius: 3px; background: #fff; color: #2c3338;
+                cursor: pointer; vertical-align: middle;
+            }
+            .veyra-lsyn-btn:hover { background: #f0f0f1; border-color: #2271b1; color: #2271b1; }
+            /* MS reads as "off" until switched on. */
+            .veyra-lsyn-ms { min-width: 22px; border-color: #dcdcde; color: #c3c4c7; background: #f6f7f7; }
+            .veyra-lsyn-ms.is-on,
+            .veyra-lsyn-ms.is-on:hover { background: #00a32a; border-color: #008a20; color: #fff; }
+            .veyra-lsyn-ms.is-busy { opacity: 0.5; cursor: wait; }
+            .veyra-lsyn-url.is-money .veyra-lsyn-host { font-weight: 700; }
+            #veyra-copied-pop {
+                position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+                z-index: 100020; pointer-events: none; text-align: center; opacity: 0;
+                max-width: 80vw; word-break: break-all;
+            }
+            #veyra-copied-pop .veyra-copied-head { font-size: 20px; font-weight: 700; color: #2271b1; }
+            #veyra-copied-pop .veyra-copied-val { margin-top: 4px; font-size: 14px; color: #00a32a; }
             .veyra-lsyn-url a { text-decoration: none; }
             /* Guarantees one line per link: the value ellipsises inside its own box
                while the ⓘ stays outside it and can never be clipped away. */
@@ -3008,6 +3126,75 @@ class Veyra {
                     return res.data;
                 });
             }
+
+            // --- D / C copy buttons + "Copied!" popup --------------------------
+            function copyText(text){
+                if (navigator.clipboard && window.isSecureContext) {
+                    return navigator.clipboard.writeText(text);
+                }
+                // http:// admin (e.g. Local) has no async clipboard API.
+                return new Promise(function(resolve, reject){
+                    var ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed'; ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    var ok = false;
+                    try { ok = document.execCommand('copy'); } catch (err) {}
+                    document.body.removeChild(ta);
+                    ok ? resolve() : reject(new Error('copy failed'));
+                });
+            }
+            var pop = null, popTimer = null;
+            function showCopied(text){
+                if (!pop) {
+                    pop = document.createElement('div');
+                    pop.id = 'veyra-copied-pop';
+                    pop.innerHTML = '<div class="veyra-copied-head">Copied!</div><div class="veyra-copied-val"></div>';
+                    document.body.appendChild(pop);
+                }
+                pop.querySelector('.veyra-copied-val').textContent = text;
+                clearTimeout(popTimer);
+                pop.style.transition = 'opacity 0.5s ease';   // fade in 0.5s
+                void pop.offsetWidth;
+                pop.style.opacity = '1';
+                popTimer = setTimeout(function(){
+                    pop.style.transition = 'opacity 1s ease'; // fade out 1s
+                    pop.style.opacity = '0';
+                }, 500);
+            }
+            document.addEventListener('click', function(e){
+                var b = e.target.closest ? e.target.closest('.veyra-lsyn-copy') : null;
+                if (!b) return;
+                e.preventDefault();
+                var text = b.getAttribute('data-copy') || '';
+                if (!text) return;
+                copyText(text).then(function(){ showCopied(text); })
+                    .catch(function(err){ alert('Copy failed: ' + err.message); });
+            });
+
+            // --- MS (money site) toggle ---------------------------------------
+            document.addEventListener('click', function(e){
+                var b = e.target.closest ? e.target.closest('.veyra-lsyn-ms') : null;
+                if (!b) return;
+                e.preventDefault();
+                var domain = b.getAttribute('data-domain');
+                if (!domain || b.classList.contains('is-busy')) return;
+                b.classList.add('is-busy');
+                post('veyra_toggle_money_site', [['domain', domain]]).then(function(d){
+                    var on = !!d.on;
+                    // Every row linking to the same domain changes together.
+                    document.querySelectorAll('.veyra-lsyn-ms[data-domain="' + d.domain + '"]').forEach(function(x){
+                        x.classList.toggle('is-on', on);
+                        x.setAttribute('aria-pressed', on ? 'true' : 'false');
+                        x.setAttribute('title', 'money site: ' + (on ? 'TRUE' : 'FALSE'));
+                    });
+                    document.querySelectorAll('.veyra-lsyn-url[data-domain="' + d.domain + '"]').forEach(function(x){
+                        x.classList.toggle('is-money', on);
+                    });
+                }).catch(function(err){ alert('Failed to toggle money site: ' + err.message); })
+                  .finally(function(){ b.classList.remove('is-busy'); });
+            });
 
             // --- Hover tooltip for truncated anchors / urls ------------------
             var tip = null;
