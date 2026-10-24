@@ -171,6 +171,10 @@ class Veyra {
         // Permanent deletion bypasses transition_post_status entirely, so it needs
         // its own entry point. Fires while the row still exists.
         add_action('before_delete_post', array($this, 'veyra_autocal_on_delete'), 10, 2);
+        // "f800 - rescan" button beside the auto-calibrate switch: a one-shot full
+        // check that every should_remain_on_homepage post is on feed page 1, fixing
+        // any that aren't by back-dating competitors and/or raising posts_per_page.
+        add_action('wp_ajax_veyra_autocal_rescan', array($this, 'ajax_autocal_rescan'));
 
         // "Blog pages show at most" (posts_per_page) controller placed on edit.php
         // next to the Add Post button, plus a dynamic "ROLLED-OFF POSTS BELOW"
@@ -2390,6 +2394,158 @@ class Veyra {
     }
 
     /* ---------------------------------------------------------------------
+     * f800 - rescan
+     *
+     * The transition hooks above only ever react to a single post crossing the
+     * page-1 boundary. This is the full, on-demand version: look at EVERY
+     * published should_remain_on_homepage post and make sure all of them are on
+     * feed page 1.
+     *
+     * A non-sticky post is on page 1 iff its rank in the post_date DESC feed is
+     * <= posts_per_page (published stickies always are — see
+     * veyra_feed_page_one_ids()). So the setting needed is simply the rank of the
+     * lowest-ranked flagged post.
+     *
+     * With "randomly back date non-should-remain posts" ticked, the rescan first
+     * tries to make room without touching the setting: it takes the plain posts
+     * (no flag of either kind, not sticky) ranked ABOVE the oldest flagged post
+     * and back-dates as many as needed below it. Each one is moved to a random
+     * date + time (to the second) 3–7 days before the previous point, starting
+     * from the oldest flagged post's date, so they trail off like a drip instead
+     * of piling onto one timestamp. The oldest of those candidates are moved
+     * first, which leaves the top of the homepage untouched. Whatever shortfall
+     * remains is then covered by enlarging posts_per_page. The setting is never
+     * lowered here.
+     * ------------------------------------------------------------------- */
+
+    /** AJAX: run the f800 rescan. POST backdate=1|0. */
+    public function ajax_autocal_rescan() {
+        check_ajax_referer('veyra_elephant_tools', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Unauthorized');
+        }
+        $backdate = isset($_POST['backdate']) && $_POST['backdate'] === '1';
+        wp_send_json_success($this->veyra_autocal_rescan($backdate));
+    }
+
+    /** Published posts in feed order (post_date DESC, ID DESC — same as veyra_feed_page_one_ids()). */
+    private function veyra_feed_all_rows() {
+        global $wpdb;
+        return $this->veyra_feed_rows(
+            "SELECT ID, post_date FROM {$wpdb->posts}
+              WHERE post_type = 'post' AND post_status = 'publish'
+              ORDER BY post_date DESC, ID DESC"
+        );
+    }
+
+    /**
+     * 1-based rank of each non-sticky flagged post in the feed, keyed by post ID.
+     * Stickies are left out because core hoists them onto page 1 regardless.
+     */
+    private function veyra_sroh_ranks($rows, $sroh_map, $sticky) {
+        $ranks = array();
+        foreach ($rows as $i => $row) {
+            if (!empty($sroh_map[$row->ID]) && !in_array($row->ID, $sticky, true)) {
+                $ranks[$row->ID] = $i + 1;
+            }
+        }
+        return $ranks;
+    }
+
+    /** @return array summary for the UI */
+    private function veyra_autocal_rescan($backdate) {
+        global $wpdb;
+
+        $raw_per_page = (int) get_option('posts_per_page', 10);
+        $sroh_map = $this->veyra_flag_get_map(self::VEYRA_SROH_OPTION);
+        $srro_map = $this->veyra_flag_get_map(self::VEYRA_SRRO_OPTION);
+        $sticky   = array_filter(array_map('intval', (array) get_option('sticky_posts', array())));
+
+        $rows  = $this->veyra_feed_all_rows();
+        $ranks = $this->veyra_sroh_ranks($rows, $sroh_map, $sticky);
+
+        $result = array(
+            'flagged_total'    => count(array_filter($sroh_map)),
+            'flagged_published'=> 0,
+            'missing_before'   => 0,
+            'backdated'        => array(),
+            'per_page_before'  => $raw_per_page,
+            'per_page_after'   => $raw_per_page,
+        );
+        foreach ($rows as $row) {
+            if (!empty($sroh_map[$row->ID])) {
+                $result['flagged_published']++;
+            }
+        }
+
+        // -1 = "show every post": everything is already on the one and only page.
+        if ($raw_per_page < 1 || empty($ranks)) {
+            return $result;
+        }
+        $per_page = $raw_per_page;
+
+        foreach ($ranks as $rank) {
+            if ($rank > $per_page) {
+                $result['missing_before']++;
+            }
+        }
+        if (!$result['missing_before']) {
+            return $result;
+        }
+
+        if ($backdate) {
+            $needed = max($ranks);              // rank of the oldest flagged post
+            $excess = $needed - $per_page;      // rows that must leave the space above it
+
+            // Plain posts sitting above the oldest flagged post, oldest first.
+            $candidates = array();
+            for ($i = $needed - 2; $i >= 0; $i--) {
+                $id = $rows[$i]->ID;
+                if (empty($sroh_map[$id]) && empty($srro_map[$id]) && !in_array($id, $sticky, true)) {
+                    $candidates[] = $id;
+                }
+            }
+            $to_move = array_slice($candidates, 0, $excess);
+
+            $point = strtotime($rows[$needed - 1]->post_date . ' UTC');
+            foreach ($to_move as $id) {
+                $point   -= wp_rand(3 * DAY_IN_SECONDS, 7 * DAY_IN_SECONDS);
+                $new_date = gmdate('Y-m-d H:i:s', $point);
+                $old_date = get_post_field('post_date', $id);
+                // Straight to the row rather than wp_update_post(): a date shift on an
+                // already-published post isn't a save, and save_post handlers here
+                // (wayback / postmeta boxes) expect an editor $_POST behind them.
+                $wpdb->update(
+                    $wpdb->posts,
+                    array('post_date' => $new_date, 'post_date_gmt' => get_gmt_from_date($new_date)),
+                    array('ID' => $id),
+                    array('%s', '%s'),
+                    array('%d')
+                );
+                clean_post_cache($id);
+                $result['backdated'][] = array(
+                    'id'    => $id,
+                    'title' => get_the_title($id),
+                    'from'  => $old_date,
+                    'to'    => $new_date,
+                );
+            }
+
+            if ($to_move) {
+                $rows  = $this->veyra_feed_all_rows();
+                $ranks = $this->veyra_sroh_ranks($rows, $sroh_map, $sticky);
+            }
+        }
+
+        $needed = max($ranks);
+        if ($needed > $per_page) {
+            update_option('posts_per_page', $needed);
+            $result['per_page_after'] = $needed;
+        }
+        return $result;
+    }
+
+    /* ---------------------------------------------------------------------
      * link_synopsis column (Posts list screen)
      *
      * Per post we store the OUTBOUND links found in post_content as a JSON array
@@ -3103,6 +3259,13 @@ class Veyra {
                 display: inline-flex; align-items: center; gap: 6px;
                 margin-left: 4px; padding-left: 10px; border-left: 1px solid #c3c4c7;
             }
+            .veyra-reading-ctl .veyra-rescan {
+                display: inline-flex; align-items: center; gap: 6px;
+                margin-left: 4px; padding-left: 10px; border-left: 1px solid #c3c4c7;
+            }
+            .veyra-reading-ctl .veyra-rescan label { display: inline-flex; align-items: center; gap: 3px; }
+            .veyra-reading-ctl .veyra-rescan input[type="checkbox"] { margin: 0; }
+            .veyra-reading-ctl .veyra-rescan-status { font-weight: 600; }
             tr.veyra-rolloff-separator td {
                 height: 20px; line-height: 20px; padding: 0 10px;
                 background: #111827; color: #fff; font-weight: 700; letter-spacing: 0.02em;
@@ -3137,6 +3300,12 @@ class Veyra {
                     +     '<span class="veyra-flag-knob"></span>'
                     +   '</button>'
                     +   '<span>auto-calibrate for should-remain posts</span>'
+                    + '</span>'
+                    + '<span class="veyra-rescan">'
+                    +   '<button type="button" class="button veyra-rescan-btn">f800 - rescan</button>'
+                    +   '<label><input type="checkbox" class="veyra-rescan-backdate" checked>'
+                    +     'randomly back date non-"should-remain" posts</label>'
+                    +   '<span class="veyra-rescan-status"></span>'
                     + '</span>';
                 addBtn.insertAdjacentElement('afterend', wrap);
 
@@ -3144,6 +3313,53 @@ class Veyra {
                 var save   = wrap.querySelector('.veyra-reading-save');
                 var status = wrap.querySelector('.veyra-reading-status');
                 var acBtn  = wrap.querySelector('.veyra-autocal-toggle');
+                var rsBtn  = wrap.querySelector('.veyra-rescan-btn');
+                var rsBack = wrap.querySelector('.veyra-rescan-backdate');
+                var rsStat = wrap.querySelector('.veyra-rescan-status');
+
+                rsBtn.addEventListener('click', function(){
+                    rsBtn.disabled = true; rsStat.style.color = '#787c82'; rsStat.textContent = 'scanning…';
+                    var body = new URLSearchParams();
+                    body.append('action', 'veyra_autocal_rescan');
+                    body.append('nonce', NONCE);
+                    body.append('backdate', rsBack.checked ? '1' : '0');
+                    fetch(AJAX_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+                        .then(function(r){ return r.json(); })
+                        .then(function(res){
+                            if (!res || !res.success) {
+                                rsStat.style.color = '#dc3232'; rsStat.textContent = (res && res.data) ? res.data : 'rescan failed';
+                                return;
+                            }
+                            var d = res.data, moved = d.backdated.length;
+                            var grew = d.per_page_after !== d.per_page_before;
+                            var msg = d.flagged_published + ' should_remain_on_homepage';
+                            if (!d.missing_before) {
+                                msg += ' — all already on homepage, nothing changed';
+                            } else {
+                                msg += ', ' + d.missing_before + ' were off homepage';
+                                if (moved) msg += ' — back-dated ' + moved;
+                                msg += grew ? (moved ? ',' : ' —') + ' posts_per_page ' + d.per_page_before + ' → ' + d.per_page_after
+                                            : (moved ? '' : ' — no change');
+                            }
+                            rsStat.style.color = '#46b450'; rsStat.textContent = msg;
+                            if (moved) {
+                                console.log('[veyra f800] back-dated posts', d.backdated);
+                            }
+                            if (grew) {
+                                perPage = d.per_page_after;
+                                input.value = perPage;
+                            }
+                            // Back-dating reorders the list, so redraw it from the server.
+                            if (moved) {
+                                rsStat.textContent = msg + ' — reloading…';
+                                setTimeout(function(){ window.location.reload(); }, 2500);
+                            } else if (grew) {
+                                insertSeparator();
+                            }
+                        })
+                        .catch(function(err){ rsStat.style.color = '#dc3232'; rsStat.textContent = 'failed: ' + err.message; })
+                        .finally(function(){ rsBtn.disabled = false; });
+                });
 
                 acBtn.addEventListener('click', function(){
                     if (acBtn.classList.contains('is-busy')) return;
