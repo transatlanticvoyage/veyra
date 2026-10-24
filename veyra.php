@@ -175,12 +175,19 @@ class Veyra {
         // check that every should_remain_on_homepage post is on feed page 1, fixing
         // any that aren't by back-dating competitors and/or raising posts_per_page.
         add_action('wp_ajax_veyra_autocal_rescan', array($this, 'ajax_autocal_rescan'));
+        // "f900 - clean now": stricter sibling of f800 — page 1 ends up holding ONLY
+        // should_remain_on_homepage posts, and posts_per_page is lowered to fit.
+        add_action('wp_ajax_veyra_autocal_clean', array($this, 'ajax_autocal_clean'));
 
         // "Blog pages show at most" (posts_per_page) controller placed on edit.php
         // next to the Add Post button, plus a dynamic "ROLLED-OFF POSTS BELOW"
         // separator row inserted into the list after the Nth published row.
         add_action('wp_ajax_veyra_save_posts_per_page', array($this, 'ajax_save_posts_per_page'));
         add_action('admin_footer-edit.php', array($this, 'veyra_reading_controls_footer_assets'));
+
+        // Drafts float to the top of the Posts list (default sort only) under their
+        // own "DRAFTS" separator row, drawn by veyra_reading_controls_footer_assets().
+        add_filter('posts_orderby', array($this, 'veyra_drafts_first_orderby'), 10, 2);
 
         // "link_synopsis" column on the native Posts list screen (edit.php).
         // Leftmost column: a compact per-post table of the OUTBOUND links found in
@@ -2455,9 +2462,51 @@ class Veyra {
         return $ranks;
     }
 
+    /**
+     * Move each post to a random date + time (to the second) 3–7 days before the
+     * previous point, starting from $from_date, so they trail off like a drip
+     * instead of piling onto one timestamp. Pass $ids oldest first.
+     *
+     * @param int[]  $ids
+     * @param string $from_date local post_date the drip starts below
+     * @param bool   $dry       compute the dates but write nothing
+     * @return array[] { id, title, from, to }
+     */
+    private function veyra_backdate_drip($ids, $from_date, $dry = false) {
+        global $wpdb;
+        $out   = array();
+        // post_date is site-local; treating it as UTC for the arithmetic and
+        // formatting it back the same way keeps it local end to end.
+        $point = strtotime($from_date . ' UTC');
+        foreach ($ids as $id) {
+            $point   -= wp_rand(3 * DAY_IN_SECONDS, 7 * DAY_IN_SECONDS);
+            $new_date = gmdate('Y-m-d H:i:s', $point);
+            $old_date = get_post_field('post_date', $id);
+            if (!$dry) {
+                // Straight to the row rather than wp_update_post(): a date shift on an
+                // already-published post isn't a save, and save_post handlers here
+                // (wayback / postmeta boxes) expect an editor $_POST behind them.
+                $wpdb->update(
+                    $wpdb->posts,
+                    array('post_date' => $new_date, 'post_date_gmt' => get_gmt_from_date($new_date)),
+                    array('ID' => $id),
+                    array('%s', '%s'),
+                    array('%d')
+                );
+                clean_post_cache($id);
+            }
+            $out[] = array(
+                'id'    => (int) $id,
+                'title' => get_the_title($id),
+                'from'  => $old_date,
+                'to'    => $new_date,
+            );
+        }
+        return $out;
+    }
+
     /** @return array summary for the UI */
     private function veyra_autocal_rescan($backdate) {
-        global $wpdb;
 
         $raw_per_page = (int) get_option('posts_per_page', 10);
         $sroh_map = $this->veyra_flag_get_map(self::VEYRA_SROH_OPTION);
@@ -2510,29 +2559,7 @@ class Veyra {
             }
             $to_move = array_slice($candidates, 0, $excess);
 
-            $point = strtotime($rows[$needed - 1]->post_date . ' UTC');
-            foreach ($to_move as $id) {
-                $point   -= wp_rand(3 * DAY_IN_SECONDS, 7 * DAY_IN_SECONDS);
-                $new_date = gmdate('Y-m-d H:i:s', $point);
-                $old_date = get_post_field('post_date', $id);
-                // Straight to the row rather than wp_update_post(): a date shift on an
-                // already-published post isn't a save, and save_post handlers here
-                // (wayback / postmeta boxes) expect an editor $_POST behind them.
-                $wpdb->update(
-                    $wpdb->posts,
-                    array('post_date' => $new_date, 'post_date_gmt' => get_gmt_from_date($new_date)),
-                    array('ID' => $id),
-                    array('%s', '%s'),
-                    array('%d')
-                );
-                clean_post_cache($id);
-                $result['backdated'][] = array(
-                    'id'    => $id,
-                    'title' => get_the_title($id),
-                    'from'  => $old_date,
-                    'to'    => $new_date,
-                );
-            }
+            $result['backdated'] = $this->veyra_backdate_drip($to_move, $rows[$needed - 1]->post_date);
 
             if ($to_move) {
                 $rows  = $this->veyra_feed_all_rows();
@@ -2544,6 +2571,95 @@ class Veyra {
         if ($needed > $per_page) {
             update_option('posts_per_page', $needed);
             $result['per_page_after'] = $needed;
+        }
+        return $result;
+    }
+
+    /* ---------------------------------------------------------------------
+     * f900 - clean now
+     *
+     * Like f800, but the target is stricter: feed page 1 shows ONLY
+     * should_remain_on_homepage posts. Every published, non-sticky post that
+     * is NOT flagged on-homepage and ranks above the oldest flagged post —
+     * should_remain_rolled_off posts and plain posts alike — is back-dated
+     * below it with the same 3–7 day drip, oldest first. posts_per_page is then
+     * set to exactly what's left above that point — the flagged posts plus any
+     * stickies dated among them — which LOWERS it in the usual case (f800 only
+     * ever raises it).
+     *
+     * Stickies are left alone: core hoists them onto page 1 whatever their date,
+     * so an unflagged sticky can't be cleaned off by back-dating. They're counted
+     * in the summary so the UI can say so.
+     *
+     * dry=1 computes the plan without writing, for the confirmation popup.
+     *
+     * Published posts only (as with f800): drafts, scheduled, pending and
+     * private posts don't exist for this — they're never counted, ranked or
+     * back-dated, and their dates are ignored.
+     * ------------------------------------------------------------------- */
+
+    /** AJAX: run (or preview, dry=1) the f900 clean. */
+    public function ajax_autocal_clean() {
+        check_ajax_referer('veyra_elephant_tools', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Unauthorized');
+        }
+        $dry = isset($_POST['dry']) && $_POST['dry'] === '1';
+        $res = $this->veyra_autocal_clean($dry);
+        if (is_wp_error($res)) {
+            wp_send_json_error($res->get_error_message());
+        }
+        wp_send_json_success($res);
+    }
+
+    /** @return array|WP_Error summary for the UI */
+    private function veyra_autocal_clean($dry) {
+        $raw_per_page = (int) get_option('posts_per_page', 10);
+        $sroh_map = $this->veyra_flag_get_map(self::VEYRA_SROH_OPTION);
+        $srro_map = $this->veyra_flag_get_map(self::VEYRA_SRRO_OPTION);
+        $sticky   = array_filter(array_map('intval', (array) get_option('sticky_posts', array())));
+
+        $rows  = $this->veyra_feed_all_rows();
+        $ranks = $this->veyra_sroh_ranks($rows, $sroh_map, $sticky);
+        if (empty($ranks)) {
+            return new WP_Error('veyra_no_sroh', 'No published, non-sticky posts are marked should_remain_on_homepage — nothing to keep, so nothing was changed.');
+        }
+
+        $needed     = max($ranks);
+        $candidates = array();
+        $srro_moved = 0;
+        for ($i = $needed - 2; $i >= 0; $i--) {
+            $id = $rows[$i]->ID;
+            if (empty($sroh_map[$id]) && !in_array($id, $sticky, true)) {
+                $candidates[] = $id;
+                if (!empty($srro_map[$id])) {
+                    $srro_moved++;
+                }
+            }
+        }
+
+        $unflagged_sticky = 0;
+        foreach ($rows as $row) {
+            if (in_array($row->ID, $sticky, true) && empty($sroh_map[$row->ID])) {
+                $unflagged_sticky++;
+            }
+        }
+
+        // The oldest flagged post's rank once every candidate has dropped below it.
+        // Not simply count($ranks): stickies dated above it still occupy window
+        // slots (core hoists them, it doesn't skip them).
+        $target = $needed - count($candidates);
+        $result = array(
+            'dry'              => $dry,
+            'flagged'          => count($ranks),
+            'backdated'        => $this->veyra_backdate_drip($candidates, $rows[$needed - 1]->post_date, $dry),
+            'srro_backdated'   => $srro_moved,
+            'unflagged_sticky' => $unflagged_sticky,
+            'per_page_before'  => $raw_per_page,
+            'per_page_after'   => $target,
+        );
+        if (!$dry && $raw_per_page !== $target) {
+            update_option('posts_per_page', $target);
         }
         return $result;
     }
@@ -3414,6 +3530,26 @@ class Veyra {
      * "Blog pages show at most" (posts_per_page) controller + rolled-off separator
      * ------------------------------------------------------------------- */
 
+    /**
+     * posts_orderby: on the Posts list screen's main query, sort drafts ahead of
+     * everything else, keeping the existing order within each group.
+     *
+     * Only when the user hasn't picked a sort (no ?orderby=) — clicking a column
+     * header gets core's plain ordering back. Drafts are listed and paginated
+     * like any other row, so with many drafts they fill page 1 of the list first.
+     */
+    public function veyra_drafts_first_orderby($orderby, $query) {
+        global $pagenow, $wpdb;
+        if (!is_admin() || $pagenow !== 'edit.php' || !$query->is_main_query()) {
+            return $orderby;
+        }
+        $type = $query->get('post_type');
+        if (($type !== 'post' && $type !== '') || !empty($_GET['orderby'])) {
+            return $orderby;
+        }
+        return "({$wpdb->posts}.post_status = 'draft') DESC" . ($orderby !== '' ? ', ' . $orderby : '');
+    }
+
     /** AJAX: save the "Blog pages show at most" setting (posts_per_page). */
     public function ajax_save_posts_per_page() {
         check_ajax_referer('veyra_elephant_tools', 'nonce');
@@ -3459,13 +3595,42 @@ class Veyra {
                 display: inline-flex; align-items: center; gap: 6px;
                 margin-left: 4px; padding-left: 10px; border-left: 1px solid #c3c4c7;
             }
-            .veyra-reading-ctl .veyra-rescan {
+            /* f800 and f900 each sit in their own bordered box. */
+            .veyra-reading-ctl .veyra-rescan,
+            .veyra-reading-ctl .veyra-clean {
                 display: inline-flex; align-items: center; gap: 6px;
-                margin-left: 4px; padding-left: 10px; border-left: 1px solid #c3c4c7;
+                margin-left: 4px; padding: 2px 6px;
+                border: 1px solid #8c8f94; border-radius: 4px; background: #fff;
             }
+            .veyra-reading-ctl .veyra-clean-status { font-weight: 600; }
+            #veyra-clean-modal {
+                position: fixed; inset: 0; z-index: 100030; display: none;
+                align-items: center; justify-content: center; background: rgba(0,0,0,0.45);
+            }
+            #veyra-clean-modal.is-open { display: flex; }
+            #veyra-clean-modal .veyra-clean-box {
+                background: #fff; border-radius: 8px; padding: 22px 24px; width: 440px; max-width: calc(100vw - 32px);
+                box-shadow: 0 10px 40px rgba(0,0,0,0.35); font-size: 13px; line-height: 1.5;
+            }
+            #veyra-clean-modal h2 { margin: 0 0 10px; font-size: 17px; }
+            #veyra-clean-modal ul { margin: 0 0 14px 18px; list-style: disc; }
+            #veyra-clean-modal .veyra-clean-warn { color: #b32d2e; }
+            #veyra-clean-modal .veyra-clean-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+            #veyra-clean-modal .veyra-clean-go {
+                font-size: 15px; font-weight: 700; padding: 8px 20px; border: none; border-radius: 5px;
+                background: #2271b1; color: #fff; cursor: pointer;
+            }
+            #veyra-clean-modal .veyra-clean-go:hover { background: #135e96; }
+            #veyra-clean-modal .veyra-clean-go:disabled { opacity: 0.6; cursor: wait; }
             .veyra-reading-ctl .veyra-rescan label { display: inline-flex; align-items: center; gap: 3px; }
             .veyra-reading-ctl .veyra-rescan input[type="checkbox"] { margin: 0; }
             .veyra-reading-ctl .veyra-rescan-status { font-weight: 600; }
+            tr.veyra-drafts-separator td {
+                height: 20px; line-height: 20px; padding: 0 10px;
+                background: #b45309; color: #fff; font-weight: 700; letter-spacing: 0.02em;
+                font-size: 12px; text-transform: uppercase;
+            }
+            tr.veyra-drafts-separator.is-end td { background: #4b5563; }
             tr.veyra-rolloff-separator td {
                 height: 20px; line-height: 20px; padding: 0 10px;
                 background: #111827; color: #fff; font-weight: 700; letter-spacing: 0.02em;
@@ -3506,6 +3671,10 @@ class Veyra {
                     +   '<label><input type="checkbox" class="veyra-rescan-backdate" checked>'
                     +     'randomly back date non-"should-remain" posts</label>'
                     +   '<span class="veyra-rescan-status"></span>'
+                    + '</span>'
+                    + '<span class="veyra-clean">'
+                    +   '<button type="button" class="button veyra-clean-btn">f900 - clean now</button>'
+                    +   '<span class="veyra-clean-status"></span>'
                     + '</span>';
                 addBtn.insertAdjacentElement('afterend', wrap);
 
@@ -3516,6 +3685,77 @@ class Veyra {
                 var rsBtn  = wrap.querySelector('.veyra-rescan-btn');
                 var rsBack = wrap.querySelector('.veyra-rescan-backdate');
                 var rsStat = wrap.querySelector('.veyra-rescan-status');
+
+                // --- f900: preview (dry run) -> confirm popup -> run -------------
+                var clBtn  = wrap.querySelector('.veyra-clean-btn');
+                var clStat = wrap.querySelector('.veyra-clean-status');
+                function cleanPost(dry){
+                    var body = new URLSearchParams();
+                    body.append('action', 'veyra_autocal_clean');
+                    body.append('nonce', NONCE);
+                    body.append('dry', dry ? '1' : '0');
+                    return fetch(AJAX_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+                        .then(function(r){ return r.json(); })
+                        .then(function(res){
+                            if (!res || !res.success) throw new Error((res && res.data) ? res.data : 'request failed');
+                            return res.data;
+                        });
+                }
+                function openCleanModal(plan){
+                    var m = document.getElementById('veyra-clean-modal');
+                    if (!m) {
+                        m = document.createElement('div');
+                        m.id = 'veyra-clean-modal';
+                        document.body.appendChild(m);
+                        m.addEventListener('click', function(e){ if (e.target === m) m.classList.remove('is-open'); });
+                        document.addEventListener('keydown', function(e){ if (e.key === 'Escape') m.classList.remove('is-open'); });
+                    }
+                    var n = plan.backdated.length;
+                    var items = '<li>Keep only the <b>' + plan.flagged + '</b> should_remain_on_homepage posts on the homepage</li>'
+                        + '<li>Back-date <b>' + n + '</b> post' + (n === 1 ? '' : 's') + ' (random 3–7 day drip)'
+                        + (plan.srro_backdated ? ', incl. ' + plan.srro_backdated + ' marked should_remain_rolled_off' : '') + '</li>'
+                        + '<li>Blog pages show at most: <b>' + plan.per_page_before + ' → ' + plan.per_page_after + '</b></li>';
+                    if (plan.unflagged_sticky) {
+                        items += '<li class="veyra-clean-warn">' + plan.unflagged_sticky + ' sticky post' + (plan.unflagged_sticky === 1 ? '' : 's')
+                            + ' not marked on-homepage will still show (stickies ignore dates)</li>';
+                    }
+                    m.innerHTML = '<div class="veyra-clean-box" role="dialog" aria-modal="true">'
+                        + '<h2>f900 - clean now?</h2><ul>' + items + '</ul>'
+                        + '<div class="veyra-clean-actions">'
+                        +   '<button type="button" class="button veyra-clean-cancel">Cancel</button>'
+                        +   '<button type="button" class="veyra-clean-go">Yes, clean now</button>'
+                        + '</div></div>';
+                    m.classList.add('is-open');
+                    var go = m.querySelector('.veyra-clean-go');
+                    go.focus();
+                    m.querySelector('.veyra-clean-cancel').addEventListener('click', function(){ m.classList.remove('is-open'); });
+                    go.addEventListener('click', function(){
+                        go.disabled = true; go.textContent = 'cleaning…';
+                        cleanPost(false).then(function(d){
+                            m.classList.remove('is-open');
+                            perPage = d.per_page_after; input.value = perPage;
+                            clStat.style.color = '#46b450';
+                            clStat.textContent = 'back-dated ' + d.backdated.length + ', posts_per_page ' + d.per_page_before + ' → ' + d.per_page_after + ' — reloading…';
+                            console.log('[veyra f900] back-dated posts', d.backdated);
+                            setTimeout(function(){ window.location.reload(); }, 2500);
+                        }).catch(function(err){
+                            m.classList.remove('is-open');
+                            clStat.style.color = '#dc3232'; clStat.textContent = err.message;
+                        });
+                    });
+                }
+                clBtn.addEventListener('click', function(){
+                    clBtn.disabled = true; clStat.style.color = '#787c82'; clStat.textContent = 'checking…';
+                    cleanPost(true).then(function(plan){
+                        clStat.textContent = '';
+                        if (!plan.backdated.length && plan.per_page_before === plan.per_page_after) {
+                            clStat.style.color = '#46b450'; clStat.textContent = 'already clean — nothing to change';
+                            return;
+                        }
+                        openCleanModal(plan);
+                    }).catch(function(err){ clStat.style.color = '#dc3232'; clStat.textContent = err.message; })
+                      .finally(function(){ clBtn.disabled = false; });
+                });
 
                 rsBtn.addEventListener('click', function(){
                     rsBtn.disabled = true; rsStat.style.color = '#787c82'; rsStat.textContent = 'scanning…';
@@ -3669,8 +3909,40 @@ class Veyra {
 
             /** Keep the span correct when columns are shown/hidden without a reload. */
             function refreshSeparatorSpan(){
-                var td = document.querySelector('tr.veyra-rolloff-separator > td');
-                if (td) { td.colSpan = visibleColumnCount(); }
+                var n = visibleColumnCount();
+                document.querySelectorAll('tr.veyra-rolloff-separator > td, tr.veyra-drafts-separator > td').forEach(function(td){
+                    td.colSpan = n;
+                });
+            }
+
+            // --- 3) "DRAFTS" section at the top of the list ------------------
+            // The rows are already sorted drafts-first server-side
+            // (veyra_drafts_first_orderby); this only labels the block. Drawn only
+            // if the drafts really do form one run at the top, so a column sort or
+            // a status filter never gets a misleading label.
+            function insertDraftsSection(){
+                var tbody = document.getElementById('the-list');
+                if (!tbody) return;
+                var rows = tbody.querySelectorAll('tr[id^="post-"]');
+                var drafts = 0;
+                while (drafts < rows.length && rows[drafts].classList.contains('status-draft')) drafts++;
+                if (!drafts) return;
+                for (var i = drafts; i < rows.length; i++) {
+                    if (rows[i].classList.contains('status-draft')) return;
+                }
+                function sep(text, extra){
+                    var tr = document.createElement('tr');
+                    tr.className = 'veyra-drafts-separator' + (extra ? ' ' + extra : '');
+                    var td = document.createElement('td');
+                    td.colSpan = visibleColumnCount();
+                    td.textContent = text;
+                    tr.appendChild(td);
+                    return tr;
+                }
+                tbody.insertBefore(sep('DRAFTS (' + drafts + ' on this page)'), rows[0]);
+                if (drafts < rows.length) {
+                    tbody.insertBefore(sep('ALL OTHER POSTS BELOW', 'is-end'), rows[drafts]);
+                }
             }
 
             // Column visibility changes come from core's Screen Options checkboxes and
@@ -3683,7 +3955,7 @@ class Veyra {
                 }
             });
 
-            function init(){ buildController(); insertSeparator(); }
+            function init(){ buildController(); insertDraftsSection(); insertSeparator(); }
             if (document.readyState === 'loading') {
                 document.addEventListener('DOMContentLoaded', init);
             } else {
