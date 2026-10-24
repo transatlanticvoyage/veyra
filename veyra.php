@@ -195,6 +195,21 @@ class Veyra {
         add_action('wp_ajax_veyra_date_switch', array($this, 'ajax_date_switch'));
         add_action('admin_footer-edit.php', array($this, 'veyra_ds_footer_assets'));
 
+        // "boldcrypted" column (rightmost) on the Posts list + "f400 - boldcrypt scan"
+        // button. The scan stores each post_title with <b class="niche|city|state">
+        // around recognised terms in post meta '_veyra_boldcrypted'. Source lists
+        // live in data/boldcrypt/. Priority 99 so it's appended after every other
+        // column, Date included.
+        add_filter('manage_post_posts_columns', array($this, 'veyra_bc_add_column'), 99);
+        add_action('manage_post_posts_custom_column', array($this, 'veyra_bc_render_column'), 10, 2);
+        add_action('wp_ajax_veyra_bc_scan_batch', array($this, 'ajax_bc_scan_batch'));
+        add_action('admin_footer-edit.php', array($this, 'veyra_bc_footer_assets'));
+
+        // rocket_chamber above the Posts list: row pagination + column pagination
+        // button bars, ported in look from tregnar's /sitejar rocket chamber.
+        add_action('wp_ajax_veyra_rocket_rows_per_page', array($this, 'ajax_rocket_rows_per_page'));
+        add_action('admin_footer-edit.php', array($this, 'veyra_rocket_footer_assets'));
+
         // "link_synopsis" column on the native Posts list screen (edit.php).
         // Leftmost column: a compact per-post table of the OUTBOUND links found in
         // that post's post_content. Backed by post meta ('_veyra_link_synopsis')
@@ -3893,6 +3908,693 @@ class Veyra {
         <?php
     }
 
+    /* ---------------------------------------------------------------------
+     * boldcrypt (Posts list column + f400 scan)
+     *
+     * Colour-codes each post_title: niche terms, cities and states each get a
+     * <b> with their own class (niche / city / state), stored per post in post
+     * meta so the list never re-parses titles on render.
+     *
+     * Source lists (data/boldcrypt/):
+     *   niches.php — per-niche bases (expanded with prefixes / suffixes) + fixed terms
+     *   cities.php — top 2,000 US cities by 2024 Census estimate + context_only words
+     *   states.php — 50 states + DC, name and postal code
+     *
+     * Matching is word-based: the title is split into word tokens and, at each
+     * position, the LONGEST phrase found in any list wins ("Kansas City" beats
+     * "Kansas", "termite control" beats "termite"). Tokens of a phrase must be
+     * separated by whitespace only, so "Plumbing - Austin" is never one phrase.
+     * Names match case-insensitively; postal codes only as an exact uppercase
+     * word so "In" / "Or" / "Me" don't light up. Equal-length ties go niche >
+     * state > city, except a city directly followed by a state code wins
+     * ("Washington DC", "New York NY").
+     * ------------------------------------------------------------------- */
+
+    const VEYRA_BC_META = '_veyra_boldcrypted';
+    const VEYRA_BC_LAST_SCAN_OPTION = 'veyra_boldcrypt_last_scan';
+    const VEYRA_BC_BATCH_SIZE = 200;
+
+    /** Word tokens with byte offsets. "St." "O'Fallon" "Winston-Salem" "a.c." stay whole; "&" is its own token. */
+    private function veyra_bc_tokens($text) {
+        preg_match_all("/[\\p{L}\\p{N}]+(?:['\\x{2019}.\\-][\\p{L}\\p{N}]+)*\\.?|&/u", $text, $m, PREG_OFFSET_CAPTURE);
+        $out = array();
+        foreach ($m[0] as $hit) {
+            $out[] = array('raw' => $hit[0], 'start' => $hit[1], 'end' => $hit[1] + strlen($hit[0]), 'norm' => $this->veyra_bc_norm_token($hit[0]));
+        }
+        return $out;
+    }
+
+    private function veyra_bc_norm_token($raw) {
+        $t = str_replace(array("\xE2\x80\x99", '.'), array("'", ''), $raw);
+        return function_exists('mb_strtolower') ? mb_strtolower($t, 'UTF-8') : strtolower($t);
+    }
+
+    /** A list phrase in the same normalized form the matcher builds from titles. */
+    private function veyra_bc_norm_phrase($phrase) {
+        return implode(' ', wp_list_pluck($this->veyra_bc_tokens($phrase), 'norm'));
+    }
+
+    /** Pluralize the last word of a phrase (cheap English rules; extra keys are harmless). */
+    private function veyra_bc_plural($phrase) {
+        if (preg_match('/(s|x|z|ch|sh)$/', $phrase)) {
+            return $phrase . 'es';
+        }
+        if (preg_match('/[^aeiou]y$/', $phrase)) {
+            return substr($phrase, 0, -1) . 'ies';
+        }
+        return $phrase . 's';
+    }
+
+    /**
+     * Build (once per request) the lookup maps from the data files.
+     *
+     * Niche phrases are NOT pre-expanded (bases × prefixes × suffixes would be over
+     * a million keys); the matcher composes [prefix] base [suffix] at scan time
+     * from four small maps instead.
+     */
+    private function veyra_bc_dictionary() {
+        static $dict = null;
+        if ($dict !== null) {
+            return $dict;
+        }
+        $dir    = plugin_dir_path(__FILE__) . 'data/boldcrypt/';
+        $niches = include $dir . 'niches.php';
+        $cities = include $dir . 'cities.php';
+        $states = include $dir . 'states.php';
+
+        $dict = array(
+            'exact' => array(), 'base' => array(), 'prefix' => array(), 'suffix' => array(),
+            'state' => array(), 'city' => array(), 'codes' => array(), 'context_only' => array(), 'max' => 1,
+        );
+        $add = function ($map, $phrase, $plural = false) use (&$dict) {
+            foreach ($plural ? array($phrase, $this->veyra_bc_plural($phrase)) : array($phrase) as $p) {
+                $key = $this->veyra_bc_norm_phrase($p);
+                if ($key !== '') {
+                    $dict[$map][$key] = true;
+                    $dict['max'] = max($dict['max'], substr_count($key, ' ') + 1);
+                }
+            }
+        };
+
+        foreach ($niches['niches'] as $niche) {
+            foreach ((array) (isset($niche['terms']) ? $niche['terms'] : array()) as $t) {
+                $add('exact', $t, true);
+            }
+            foreach ((array) (isset($niche['bases']) ? $niche['bases'] : array()) as $t) {
+                $add('base', $t, true);
+            }
+        }
+        foreach ($niches['prefixes'] as $t) {
+            $add('prefix', $t);
+        }
+        foreach ($niches['suffixes'] as $t) {
+            $add('suffix', $t, true);
+        }
+        foreach ($states as $code => $name) {
+            $add('state', $name);
+            $dict['codes'][$code] = true;
+        }
+        foreach ($cities['cities'] as $name => $code) {
+            $add('city', $name);
+        }
+        foreach ($cities['context_only'] as $name) {
+            $dict['context_only'][$this->veyra_bc_norm_phrase($name)] = true;
+        }
+        return $dict;
+    }
+
+    /**
+     * Phrase keys starting at each token: $keys[$i][$n] = normalized text of
+     * tokens $i .. $i+$n-1, only while they're whitespace-joined.
+     */
+    private function veyra_bc_keys($tokens, $text, $max) {
+        $keys  = array();
+        $count = count($tokens);
+        for ($i = 0; $i < $count; $i++) {
+            $key = '';
+            for ($n = 1; $n <= $max && $i + $n <= $count; $n++) {
+                if ($n > 1 && !$this->veyra_bc_joined($tokens[$i + $n - 2], $tokens[$i + $n - 1], $text)) {
+                    break;
+                }
+                $key .= ($n > 1 ? ' ' : '') . $tokens[$i + $n - 1]['norm'];
+                $keys[$i][$n] = $key;
+            }
+        }
+        return $keys;
+    }
+
+    /** Lengths $n for which the phrase at $i is in $map. */
+    private function veyra_bc_lens($keys, $i, $map) {
+        $out = array();
+        if (isset($keys[$i])) {
+            foreach ($keys[$i] as $n => $key) {
+                if (isset($map[$key])) {
+                    $out[] = $n;
+                }
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Longest niche phrase at $i, in tokens (0 = none): an exact term, or
+     * [prefix] base [suffix]. Each part must sit directly after the last.
+     */
+    private function veyra_bc_niche_len($keys, $i, $dict) {
+        $best = 0;
+        foreach ($this->veyra_bc_lens($keys, $i, $dict['exact']) as $n) {
+            $best = max($best, $n);
+        }
+        $starts = array(0);
+        foreach ($this->veyra_bc_lens($keys, $i, $dict['prefix']) as $p) {
+            $starts[] = $p;
+        }
+        foreach ($starts as $p) {
+            foreach ($this->veyra_bc_lens($keys, $i + $p, $dict['base']) as $b) {
+                $best = max($best, $p + $b);
+                foreach ($this->veyra_bc_lens($keys, $i + $p + $b, $dict['suffix']) as $sfx) {
+                    $best = max($best, $p + $b + $sfx);
+                }
+            }
+        }
+        return $best;
+    }
+
+    /** Is token $t an exact uppercase state code ("TX", "D.C.")? */
+    private function veyra_bc_is_code($t, $dict) {
+        $c = str_replace('.', '', $t['raw']);
+        return strlen($c) === 2 && ctype_upper($c) && isset($dict['codes'][$c]);
+    }
+
+    /** Does a state name or code start at token $i? */
+    private function veyra_bc_state_at($tokens, $i, $text, $dict) {
+        if (!isset($tokens[$i])) {
+            return false;
+        }
+        if ($this->veyra_bc_is_code($tokens[$i], $dict)) {
+            return true;
+        }
+        $key = '';
+        for ($n = 0; $n < 3 && isset($tokens[$i + $n]); $n++) {
+            if ($n && !$this->veyra_bc_joined($tokens[$i + $n - 1], $tokens[$i + $n], $text)) {
+                break;
+            }
+            $key .= ($n ? ' ' : '') . $tokens[$i + $n]['norm'];
+            if (isset($dict['state'][$key])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Only whitespace between two tokens? */
+    private function veyra_bc_joined($a, $b, $text) {
+        return trim(substr($text, $a['end'], $b['start'] - $a['end'])) === '';
+    }
+
+    /** Wrap matches in one plain-text chunk; returns escaped HTML. */
+    private function veyra_bc_mark_text($text, $dict) {
+        $tokens = $this->veyra_bc_tokens($text);
+        $count  = count($tokens);
+        $html   = '';
+        $pos    = 0;
+        $places = array('in', 'near', 'around', 'serving', 'servicing', 'throughout', 'of');
+
+        $keys   = $this->veyra_bc_keys($tokens, $text, $dict['max']);
+
+        for ($i = 0; $i < $count; ) {
+            $hit   = null;
+            $cands = array(); // $cands[$n][kind] = true
+            if ($len = $this->veyra_bc_niche_len($keys, $i, $dict)) {
+                $cands[$len]['niche'] = true;
+            }
+            foreach (array('state', 'city') as $kind) {
+                foreach ($this->veyra_bc_lens($keys, $i, $dict[$kind]) as $len) {
+                    $cands[$len][$kind] = true;
+                }
+            }
+            if ($n = ($cands ? max(array_keys($cands)) : 0)) {
+                $kinds = $cands[$n];
+                $next  = $i + $n;
+                if (isset($kinds['city'])) {
+                    $followed_by_code = isset($tokens[$next]) && $this->veyra_bc_is_code($tokens[$next], $dict);
+                    if ($followed_by_code) {
+                        $hit = 'city';
+                    }
+                    $ckey = implode(' ', wp_list_pluck(array_slice($tokens, $i, $n), 'norm'));
+                    if (isset($dict['context_only'][$ckey]) && !$hit) {
+                        $prev_ok  = $i > 0 && in_array($tokens[$i - 1]['norm'], $places, true);
+                        $comma_ok = (bool) preg_match('/^\s*,/', substr($text, $tokens[$next - 1]['end']));
+                        if (!$prev_ok && !$comma_ok && !$this->veyra_bc_state_at($tokens, $next, $text, $dict)) {
+                            unset($kinds['city']);
+                        }
+                    }
+                }
+                if (!$hit) {
+                    foreach (array('niche', 'state', 'city') as $kind) {
+                        if (isset($kinds[$kind])) {
+                            $hit = $kind;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!$hit && $this->veyra_bc_is_code($tokens[$i], $dict)) {
+                $hit = 'state';
+                $n   = 1;
+            }
+            if (!$hit) {
+                $i++;
+                continue;
+            }
+            $start = $tokens[$i]['start'];
+            $end   = $tokens[$i + $n - 1]['end'];
+            $html .= esc_html(substr($text, $pos, $start - $pos))
+                   . '<b class="' . $hit . '">' . esc_html(substr($text, $start, $end - $start)) . '</b>';
+            $pos = $end;
+            $i  += $n;
+        }
+        return $html . esc_html(substr($text, $pos));
+    }
+
+    /** Boldcrypt a whole title. Existing HTML tags in the title pass through untouched. */
+    public function veyra_bc_boldcrypt($title) {
+        $dict  = $this->veyra_bc_dictionary();
+        $parts = preg_split('/(<[^>]*>)/', (string) $title, -1, PREG_SPLIT_DELIM_CAPTURE);
+        $out   = '';
+        foreach ($parts as $k => $part) {
+            $out .= ($k % 2) ? $part : $this->veyra_bc_mark_text(html_entity_decode($part, ENT_QUOTES | ENT_HTML5, 'UTF-8'), $dict);
+        }
+        return $out;
+    }
+
+    /** Plain text of a title or of stored boldcrypt HTML, for staleness checks. */
+    private function veyra_bc_plain($html) {
+        return trim(html_entity_decode(wp_strip_all_tags((string) $html), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+    }
+
+    public function veyra_bc_add_column($columns) {
+        $columns['veyra_bc'] = '<span class="veyra-bc-th">boldcrypted</span>';
+        return $columns;
+    }
+
+    public function veyra_bc_render_column($column, $post_id) {
+        if ($column !== 'veyra_bc') {
+            return;
+        }
+        $html = get_post_meta($post_id, self::VEYRA_BC_META, true);
+        if ($html === '') {
+            echo '<span class="veyra-bc-empty">not scanned</span>';
+            return;
+        }
+        echo '<span class="veyra-bc">' . wp_kses($html, array('b' => array('class' => true))) . '</span>';
+        if ($this->veyra_bc_plain($html) !== $this->veyra_bc_plain(get_post_field('post_title', $post_id))) {
+            echo ' <span class="veyra-bc-stale" title="the title changed since the last f400 scan">stale</span>';
+        }
+    }
+
+    /** AJAX: boldcrypt one batch of posts. POST offset=<n>. */
+    public function ajax_bc_scan_batch() {
+        check_ajax_referer('veyra_elephant_tools', 'nonce');
+        if (!current_user_can('edit_posts')) {
+            wp_send_json_error('Unauthorized');
+        }
+        global $wpdb;
+        $offset = isset($_POST['offset']) ? max(0, intval($_POST['offset'])) : 0;
+        // Every real post: published, drafts, scheduled, pending, private. Not trash,
+        // auto-drafts or revisions.
+        $where = "post_type = 'post' AND post_status NOT IN ('trash', 'auto-draft', 'inherit')";
+        $total = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->posts} WHERE {$where}");
+        $rows  = $wpdb->get_results($wpdb->prepare(
+            "SELECT ID, post_title FROM {$wpdb->posts} WHERE {$where} ORDER BY ID ASC LIMIT %d OFFSET %d",
+            self::VEYRA_BC_BATCH_SIZE,
+            $offset
+        ));
+        foreach ($rows as $row) {
+            update_post_meta((int) $row->ID, self::VEYRA_BC_META, wp_slash($this->veyra_bc_boldcrypt($row->post_title)));
+        }
+        $next = $offset + count($rows);
+        $done = !$rows || $next >= $total;
+        if ($done) {
+            update_option(self::VEYRA_BC_LAST_SCAN_OPTION, time(), false);
+        }
+        wp_send_json_success(array('next' => $next, 'total' => $total, 'done' => $done));
+    }
+
+    /** Column colours + the f400 button, Posts list screen only. */
+    public function veyra_bc_footer_assets() {
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+        if (!$screen || $screen->base !== 'edit' || $screen->post_type !== 'post') {
+            return;
+        }
+        $nonce = wp_create_nonce('veyra_elephant_tools');
+        $last  = (int) get_option(self::VEYRA_BC_LAST_SCAN_OPTION, 0);
+        $last_label = $last ? 'last scan: ' . wp_date('Y-m-d H:i', $last) : 'never scanned';
+        ?>
+        <style>
+            .fixed .column-veyra_bc { width: 16%; }
+            .veyra-bc-th { font-weight: 700; }
+            .veyra-bc b { font-weight: 700; }
+            /* One colour per kind; state names and postal codes share theirs. */
+            .veyra-bc b.niche { color: #15803d; }
+            .veyra-bc b.city  { color: #1d4ed8; }
+            .veyra-bc b.state { color: #9333ea; }
+            .veyra-bc-empty { color: #a7aaad; font-style: italic; font-size: 11px; }
+            .veyra-bc-stale { font-size: 10px; font-weight: 700; color: #b45309; text-transform: uppercase; }
+            .veyra-bc-wrap {
+                display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; vertical-align: middle;
+                padding: 2px 6px; border: 1px solid #8c8f94; border-radius: 4px; background: #fff; font-size: 12px;
+            }
+            .veyra-bc-last { color: #646970; font-style: italic; }
+            .veyra-bc-status { font-weight: 600; }
+            .veyra-bc-legend b { font-weight: 700; margin-left: 4px; }
+            .veyra-bc-legend .niche { color: #15803d; }
+            .veyra-bc-legend .city  { color: #1d4ed8; }
+            .veyra-bc-legend .state { color: #9333ea; }
+        </style>
+        <script>
+        (function(){
+            var AJAX_URL = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+            var NONCE = <?php echo wp_json_encode($nonce); ?>;
+            var LAST = <?php echo wp_json_encode($last_label); ?>;
+
+            function build(){
+                if (document.querySelector('.veyra-bc-wrap')) return;
+                var anchor = document.querySelector('.veyra-lsyn-refresh-wrap')
+                          || document.querySelector('.veyra-reading-ctl')
+                          || document.querySelector('.wrap .page-title-action');
+                if (!anchor) return;
+                var wrap = document.createElement('span');
+                wrap.className = 'veyra-bc-wrap';
+                wrap.innerHTML = '<button type="button" class="button veyra-bc-btn">f400 - boldcrypt scan</button>'
+                    + '<span class="veyra-bc-legend"><b class="niche">niche</b><b class="city">city</b><b class="state">state</b></span>'
+                    + '<span class="veyra-bc-last"></span><span class="veyra-bc-status"></span>';
+                anchor.insertAdjacentElement('afterend', wrap);
+                wrap.querySelector('.veyra-bc-last').textContent = LAST;
+                var btn = wrap.querySelector('.veyra-bc-btn');
+                var status = wrap.querySelector('.veyra-bc-status');
+
+                btn.addEventListener('click', function(){
+                    btn.disabled = true;
+                    status.style.color = '#787c82';
+                    status.textContent = 'scanning…';
+                    (function step(offset){
+                        var body = new URLSearchParams();
+                        body.append('action', 'veyra_bc_scan_batch');
+                        body.append('nonce', NONCE);
+                        body.append('offset', offset);
+                        fetch(AJAX_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+                            .then(function(r){ return r.json(); })
+                            .then(function(res){
+                                if (!res || !res.success) throw new Error((res && res.data) ? res.data : 'scan failed');
+                                var d = res.data;
+                                status.textContent = d.next + ' / ' + d.total;
+                                if (!d.done) { step(d.next); return; }
+                                status.style.color = '#46b450';
+                                status.textContent = '✓ ' + d.total + ' titles scanned — reloading…';
+                                setTimeout(function(){ window.location.reload(); }, 1200);
+                            })
+                            .catch(function(err){
+                                status.style.color = '#dc3232'; status.textContent = err.message; btn.disabled = false;
+                            });
+                    })(0);
+                });
+            }
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', build);
+            } else {
+                build();
+            }
+        })();
+        </script>
+        <?php
+    }
+
+    /* ---------------------------------------------------------------------
+     * rocket_chamber (Posts list)
+     *
+     * Same look as the rocket chamber on tregnar's /sitejar page, but only the
+     * two systems that make sense here:
+     *
+     *   row pagination    — server-side, WordPress's own: Rows/page writes the
+     *                       user's native "Number of items per page" screen
+     *                       option (edit_post_per_page) and reloads; Row page
+     *                       moves ?paged=N. Prev/next wrap around (last -> 1).
+     *   column pagination — client-side: Checkbox and Title stay put (sticky);
+     *                       every other column that Screen Options leaves
+     *                       visible is paged Cols/page at a time. Hidden with a
+     *                       generated stylesheet so rows added later (Quick Edit)
+     *                       follow too. Choice remembered per browser.
+     * ------------------------------------------------------------------- */
+
+    /** AJAX: set the native per-page screen option for the Posts list. */
+    public function ajax_rocket_rows_per_page() {
+        check_ajax_referer('veyra_elephant_tools', 'nonce');
+        if (!current_user_can('edit_posts')) {
+            wp_send_json_error('Unauthorized');
+        }
+        $n = isset($_POST['value']) ? intval($_POST['value']) : 0;
+        if ($n < 1) {
+            wp_send_json_error('Invalid value');
+        }
+        update_user_meta(get_current_user_id(), 'edit_post_per_page', $n);
+        wp_send_json_success(array('value' => $n));
+    }
+
+    public function veyra_rocket_footer_assets() {
+        global $wp_list_table;
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+        if (!$screen || $screen->base !== 'edit' || $screen->post_type !== 'post' || !is_object($wp_list_table)) {
+            return;
+        }
+        $state = array(
+            'perPage'    => (int) $wp_list_table->get_pagination_arg('per_page'),
+            'total'      => (int) $wp_list_table->get_pagination_arg('total_items'),
+            'totalPages' => max(1, (int) $wp_list_table->get_pagination_arg('total_pages')),
+            'page'       => max(1, (int) $wp_list_table->get_pagenum()),
+            'onPage'     => is_array($wp_list_table->items) ? count($wp_list_table->items) : 0,
+        );
+        $nonce = wp_create_nonce('veyra_elephant_tools');
+        ?>
+        <style>
+            .rocket_chamber_div { border: 1px solid #000; padding: 0; margin: 10px 0 8px; position: relative; background: #fff; }
+            .rocket_chamber_div .rc-title {
+                position: absolute; top: 4px; left: 4px; font-size: 16px; font-weight: 700;
+                display: flex; align-items: center; gap: 6px; color: #000;
+            }
+            .rocket_chamber_div .rc-inner { margin-top: 24px; padding: 4px 8px 0; }
+            .rocket_chamber_div table.rc-grid { border-collapse: collapse; }
+            .rocket_chamber_div table.rc-grid td { border: 1px solid #000; padding: 4px; vertical-align: bottom; }
+            .rocket_chamber_div .rc-head { font-size: 16px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+            .rocket_chamber_div .rc-head b { font-weight: 700; }
+            .rocket_chamber_div .rc-head .rc-count { font-size: 14px; font-weight: 400; }
+            .rocket_chamber_div .rc-bars { display: flex; align-items: flex-end; gap: 16px; }
+            .rocket_chamber_div .rc-bar { display: flex; align-items: center; }
+            .rocket_chamber_div .rc-label { font-size: 12px; color: #4b5563; margin-right: 8px; }
+            .rocket_chamber_div .rc-group { display: inline-flex; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+            .rocket_chamber_div .rc-btn {
+                position: relative; display: inline-flex; align-items: center; margin: 0 -1px 0 0;
+                padding: 10px 8px; font-size: 14px; line-height: 20px; font-weight: 500; cursor: pointer;
+                background: #fff; color: #374151; border: 1px solid #d1d5db; border-radius: 0; min-height: 0;
+            }
+            .rocket_chamber_div .rc-btn:first-child { border-top-left-radius: 4px; border-bottom-left-radius: 4px; }
+            .rocket_chamber_div .rc-btn:last-child { border-top-right-radius: 4px; border-bottom-right-radius: 4px; margin-right: 0; }
+            .rocket_chamber_div .rc-btn svg { width: 16px; height: 16px; color: #4b5563; }
+            .rocket_chamber_div .rc-btn:focus { z-index: 10; outline: none; box-shadow: 0 0 0 2px #3b82f6; }
+            /* Row bars: blue active, gray-300 borders, row page numbers semibold. */
+            .rocket_chamber_div .rc-row .rc-btn:hover { background: #f9fafb; }
+            .rocket_chamber_div .rc-row .rc-btn.is-active { background: #2563eb; color: #fff; border-color: #2563eb; z-index: 5; }
+            .rocket_chamber_div .rc-row .rc-btn.is-active:hover { background: #1d4ed8; }
+            .rocket_chamber_div .rc-row .rc-num { font-weight: 600; color: #111827; }
+            /* Row page prev/next wheels are rounded-md (6px) in the original. */
+            .rocket_chamber_div .rc-row nav .rc-btn:first-child { border-radius: 6px 0 0 6px; }
+            .rocket_chamber_div .rc-row nav .rc-btn:last-child { border-radius: 0 6px 6px 0; }
+            /* Column bars: yellow active with black border, gray-200 borders. */
+            .rocket_chamber_div .rc-col .rc-group { box-shadow: none; }
+            .rocket_chamber_div .rc-col .rc-btn { border-color: #e5e7eb; font-weight: 400; }
+            .rocket_chamber_div .rc-col .rc-btn:hover { background: #e5e7eb; }
+            .rocket_chamber_div .rc-col .rc-btn.is-active { background: #f8f782; color: #000; border-color: #000; z-index: 5; }
+            .rocket_chamber_div .rc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        </style>
+        <style id="veyra-colpage-css"></style>
+        <script>
+        (function(){
+            var AJAX_URL = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+            var NONCE = <?php echo wp_json_encode($nonce); ?>;
+            var S = <?php echo wp_json_encode($state); ?>;
+            var STICKY = ['cb', 'title'];
+            var ROW_SIZES = [10, 25, 50, 100, 200, 'All'];
+            var COL_SIZES = [6, 8, 10, 12, 15];
+            var WHEEL_PREV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
+            var WHEEL_NEXT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10"/></svg>';
+            var ROCKET = '<svg width="22" height="22" viewBox="0 0 24 24" fill="black" style="transform:rotate(15deg)">'
+                + '<ellipse cx="12" cy="8" rx="3" ry="6" fill="black"/><path d="M12 2 L15 8 L9 8 Z" fill="black"/>'
+                + '<path d="M9 12 L7 14 L9 16 Z" fill="black"/><path d="M15 12 L17 14 L15 16 Z" fill="black"/>'
+                + '<path d="M10 14 L9 18 L10.5 16 L12 20 L13.5 16 L15 18 L14 14 Z" fill="black"/>'
+                + '<circle cx="12" cy="6" r="1" fill="white"/></svg>';
+
+            // colsChoice is a number from COL_SIZES or 'all'; colsPerPage() resolves it.
+            var colsChoice = 12, colPage = 1;
+            try {
+                var c = localStorage.getItem('veyra_rc_cols_per_page');
+                if (c === 'all') colsChoice = 'all';
+                else if (COL_SIZES.indexOf(parseInt(c, 10)) !== -1) colsChoice = parseInt(c, 10);
+                var p = parseInt(localStorage.getItem('veyra_rc_col_page'), 10);
+                if (p > 0) colPage = p;
+            } catch (e) {}
+            var chamber;
+
+            // --- row pagination (server-side) --------------------------------
+            function goToPage(n){
+                var url = new URL(window.location.href);
+                if (n <= 1) url.searchParams.delete('paged'); else url.searchParams.set('paged', n);
+                window.location.href = url.toString();
+            }
+            function setRowsPerPage(v){
+                var n = v === 'All' ? Math.max(1, S.total) : v;
+                var body = new URLSearchParams();
+                body.append('action', 'veyra_rocket_rows_per_page');
+                body.append('nonce', NONCE);
+                body.append('value', n);
+                fetch(AJAX_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+                    .then(function(r){ return r.json(); })
+                    .then(function(res){
+                        if (!res || !res.success) throw new Error((res && res.data) ? res.data : 'save failed');
+                        goToPage(1);
+                    })
+                    .catch(function(err){ alert('Rows/page failed: ' + err.message); });
+            }
+            function rowBar1(){
+                var h = '<div class="rc-bar rc-row"><span class="rc-label">Rows/page:</span><div class="rc-group" role="group">';
+                ROW_SIZES.forEach(function(v){
+                    var on = v === 'All' ? S.perPage >= S.total : S.perPage === v;
+                    h += '<button type="button" class="rc-btn' + (on ? ' is-active' : '') + '" data-rows="' + v + '">' + v + '</button>';
+                });
+                return h + '</div></div>';
+            }
+            function rowBar2(){
+                if (!S.total) return '';
+                var h = '<div class="rc-bar rc-row"><span class="rc-label">Row page:</span><nav class="rc-group" aria-label="Pagination">';
+                h += '<button type="button" class="rc-btn rc-wrap" data-rowpage="' + (S.page === 1 ? S.totalPages : S.page - 1) + '" title="previous (wraps to last)">' + WHEEL_PREV + '</button>';
+                var start = Math.max(1, S.page - 2), end = Math.min(S.totalPages, start + 4);
+                if (end - start < 4) start = Math.max(1, end - 4);
+                for (var i = start; i <= end; i++) {
+                    h += '<button type="button" class="rc-btn rc-num' + (i === S.page ? ' is-active' : '') + '" data-rowpage="' + i + '">' + i + '</button>';
+                }
+                h += '<button type="button" class="rc-btn rc-wrap" data-rowpage="' + (S.page === S.totalPages ? 1 : S.page + 1) + '" title="next (wraps to first)">' + WHEEL_NEXT + '</button>';
+                return h + '</nav></div>';
+            }
+
+            // --- column pagination (client-side) -----------------------------
+            /** Column keys in header order, minus the ones Screen Options hides. */
+            function columnKeys(){
+                var out = [];
+                document.querySelectorAll('.wp-list-table thead tr > [id]').forEach(function(cell){
+                    if (!cell.classList.contains('hidden')) out.push(cell.id);
+                });
+                return out;
+            }
+            function pagedKeys(){ return columnKeys().filter(function(k){ return STICKY.indexOf(k) === -1; }); }
+            function colsPerPage(){ return colsChoice === 'all' ? Math.max(1, pagedKeys().length) : colsChoice; }
+            function totalColPages(){
+                return Math.max(1, Math.ceil(pagedKeys().length / colsPerPage()));
+            }
+            function applyColumns(){
+                var keys = pagedKeys(), pages = totalColPages();
+                if (colPage > pages) colPage = pages;
+                var per = colsPerPage(), from = (colPage - 1) * per, show = keys.slice(from, from + per);
+                var css = keys.filter(function(k){ return show.indexOf(k) === -1; })
+                    .map(function(k){ return '.wp-list-table .column-' + k + '{display:none!important}'; }).join('\n');
+                document.getElementById('veyra-colpage-css').textContent = css;
+                try {
+                    localStorage.setItem('veyra_rc_cols_per_page', colsChoice);
+                    localStorage.setItem('veyra_rc_col_page', colPage);
+                } catch (e) {}
+                document.dispatchEvent(new CustomEvent('veyra:columns-changed'));
+                return show.length;
+            }
+            function colBar1(){
+                var h = '<div class="rc-bar rc-col"><span class="rc-label">Cols/page:</span><div class="rc-group">';
+                COL_SIZES.forEach(function(v){
+                    h += '<button type="button" class="rc-btn' + (colsChoice === v ? ' is-active' : '') + '" data-cols="' + v + '">' + v + '</button>';
+                });
+                h += '<button type="button" class="rc-btn' + (colsChoice === 'all' ? ' is-active' : '') + '" data-cols="all">ALL</button>';
+                return h + '</div></div>';
+            }
+            function colBar2(){
+                var pages = totalColPages();
+                if (pages <= 1) return '';
+                var h = '<div class="rc-bar rc-col"><span class="rc-label">Col page:</span><div class="rc-group">';
+                h += '<button type="button" class="rc-btn" data-colpage="1"' + (colPage === 1 ? ' disabled' : '') + '>≪</button>';
+                h += '<button type="button" class="rc-btn" data-colpage="' + (colPage === 1 ? pages : colPage - 1) + '" title="previous (wraps to last)">' + WHEEL_PREV + '</button>';
+                var first = Math.max(1, Math.min(pages - 4, colPage - 2));
+                for (var i = 0; i < Math.min(5, pages); i++) {
+                    var n = first + i;
+                    h += '<button type="button" class="rc-btn' + (n === colPage ? ' is-active' : '') + '" data-colpage="' + n + '">' + n + '</button>';
+                }
+                h += '<button type="button" class="rc-btn" data-colpage="' + (colPage === pages ? 1 : colPage + 1) + '" title="next (wraps to first)">' + WHEEL_NEXT + '</button>';
+                h += '<button type="button" class="rc-btn" data-colpage="' + pages + '"' + (colPage === pages ? ' disabled' : '') + '>≫</button>';
+                return h + '</div></div>';
+            }
+
+            function render(){
+                var shown = applyColumns();
+                chamber.querySelector('.rc-row-count').innerHTML = 'Showing <b>' + S.onPage + '</b> of <b>' + S.total + '</b> results';
+                chamber.querySelector('.rc-col-count').innerHTML = 'Showing <b>' + shown + '</b> non-sticky columns of <b>' + pagedKeys().length + '</b> columns';
+                chamber.querySelector('.rc-row-bars').innerHTML = rowBar1() + rowBar2();
+                chamber.querySelector('.rc-col-bars').innerHTML = colBar1() + colBar2();
+            }
+
+            function build(){
+                var table = document.querySelector('.wp-list-table');
+                if (!table || document.querySelector('.rocket_chamber_div')) return;
+                chamber = document.createElement('div');
+                chamber.className = 'rocket_chamber_div';
+                chamber.innerHTML = '<div class="rc-title">' + ROCKET + 'rocket_chamber</div>'
+                    + '<div class="rc-inner"><table class="rc-grid"><tbody>'
+                    + '<tr><td><div class="rc-head"><b>row pagination</b><span class="rc-count rc-row-count"></span></div></td>'
+                    +     '<td><div class="rc-head"><b>column pagination</b><span class="rc-count rc-col-count"></span></div></td></tr>'
+                    + '<tr><td><div class="rc-bars rc-row-bars"></div></td><td><div class="rc-bars rc-col-bars"></div></td></tr>'
+                    + '</tbody></table></div>';
+                var nav = document.querySelector('#posts-filter .tablenav.top');
+                (nav || table).parentNode.insertBefore(chamber, nav || table);
+
+                chamber.addEventListener('click', function(e){
+                    var b = e.target.closest('button');
+                    if (!b || b.disabled) return;
+                    e.preventDefault();
+                    if (b.hasAttribute('data-rows')) {
+                        var v = b.getAttribute('data-rows');
+                        setRowsPerPage(v === 'All' ? 'All' : parseInt(v, 10));
+                    } else if (b.hasAttribute('data-rowpage')) {
+                        var n = parseInt(b.getAttribute('data-rowpage'), 10);
+                        if (n !== S.page) goToPage(n);
+                    } else if (b.hasAttribute('data-cols')) {
+                        var c = b.getAttribute('data-cols');
+                        colsChoice = c === 'all' ? 'all' : parseInt(c, 10);
+                        colPage = 1;
+                        render();
+                    } else if (b.hasAttribute('data-colpage')) {
+                        colPage = parseInt(b.getAttribute('data-colpage'), 10);
+                        render();
+                    }
+                });
+                // Screen Options column toggles change what's pageable.
+                document.addEventListener('click', function(e){
+                    if (e.target.closest && (e.target.closest('.hide-column-tog') || e.target.closest('.veyra-lsyn-cols input[data-col]'))) setTimeout(render, 0);
+                });
+                render();
+            }
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', build);
+            } else {
+                build();
+            }
+        })();
+        </script>
+        <?php
+    }
+
     /** AJAX: save the "Blog pages show at most" setting (posts_per_page). */
     public function ajax_save_posts_per_page() {
         check_ajax_referer('veyra_elephant_tools', 'nonce');
@@ -4297,6 +4999,8 @@ class Veyra {
                     setTimeout(refreshSeparatorSpan, 0);
                 }
             });
+            // ...and from rocket_chamber column pagination.
+            document.addEventListener('veyra:columns-changed', refreshSeparatorSpan);
 
             function init(){ buildController(); insertDraftsSection(); insertSeparator(); }
             if (document.readyState === 'loading') {
