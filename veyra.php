@@ -3155,6 +3155,16 @@ class Veyra {
             .wp-list-table tfoot td { border: 1px solid #c3c4c7; }
             .wp-list-table thead tr > * + *,
             .wp-list-table tfoot tr > * + * { border-left-width: 0; }
+            /* No zebra striping: every row on core's lighter (white) background, each
+               row ruled top and bottom. (0,2,2) beats core's ".striped > tbody >
+               :nth-child(odd)". Cells get a bottom rule and the first row also a top
+               one, so the line between two rows is 1px rather than a doubled 2px.
+               Separator rows keep their own colours (set on their <td>s). */
+            .wp-list-table.striped > tbody > tr { background-color: #fff; }
+            .wp-list-table > tbody > tr > td,
+            .wp-list-table > tbody > tr > th { border-bottom: 1px solid #dcdcde; }
+            .wp-list-table > tbody > tr:first-child > td,
+            .wp-list-table > tbody > tr:first-child > th { border-top: 1px solid #dcdcde; }
             /* Title gets an explicit share. It used to get no width rule and live off
                whatever was left over, but once link_synopsis (then 40%), boldcrypted
                (16%), Date (core 14%) and the px columns added up past the table width,
