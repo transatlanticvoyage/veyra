@@ -2995,7 +2995,15 @@ class Veyra {
             $nofollow = $this->veyra_lsyn_is_nofollow_value(isset($link['is_nofollow']) ? $link['is_nofollow'] : false);
             $anchor   = $this->veyra_lsyn_truncate_cell(isset($link['anchor']) ? $link['anchor'] : '', 26);
             $raw_url  = isset($link['target_url']) ? $link['target_url'] : '';
-            $url      = $this->veyra_lsyn_url_cell($raw_url, 64);
+            // No server-side cut for URLs: .veyra-lsyn-val ellipsises them right at
+            // the cell edge, so the text reaches the border at any column width. A
+            // fixed character cap left a wide dead gap whenever the column was wider
+            // than the cap. The ⓘ can't know whether CSS cut the text, so it's shown
+            // for any URL long enough that it plausibly was.
+            $url      = $this->veyra_lsyn_url_cell($raw_url, 2048);
+            if ($url['tip'] === '' && strlen($raw_url) > 30) {
+                $url['tip'] = '<span class="veyra-lsyn-tip" tabindex="0" role="button" aria-label="show full value" data-veyra-tip="' . esc_attr($raw_url) . '">&#9432;</span>';
+            }
             $reg      = $this->veyra_lsyn_registrable_domain($url['host']);
             $money    = $reg !== '' && !empty($money_map[$reg]);
             // The value is wrapped in .veyra-lsyn-val (which does the ellipsis) while
@@ -3128,7 +3136,15 @@ class Veyra {
             /* 40% (was 20%): doubles the visible URL text before it ellipsises. The
                URL sub-column is what's left after the 44px nf column and the 40%
                anchor, so doubling the outer width more than doubles it. */
-            .fixed .column-veyra_lsyn { width: 29%; }
+            /* 36% (was 29%): +120px at the ~1700px table this is used at. Plain %
+               because Chrome treats calc() widths on fixed-layout columns as auto.
+               ~100px came out of slack the layout was spreading over the px columns,
+               the rest off boldcrypted (8.4%). Title keeps its 18%. */
+            .fixed .column-veyra_lsyn { width: 36%; }
+            /* Boxed on all 4 sides, and tight on the right so the URL's ellipsis + ⓘ
+               end ~4px from the border (core pads cells 10px; the URL sub-cell had 6px). */
+            .wp-list-table tbody td.column-veyra_lsyn { border: 1px solid #c3c4c7; padding-right: 4px; }
+            table.veyra-lsyn-tbl td.veyra-lsyn-url { padding-right: 0; }
             /* Box every header cell on all 4 sides. The checkbox header is a <td>,
                not a <th>, in core's markup, so it's included to keep the row whole.
                widefat tables use separate borders, so neighbours drop their left
@@ -4266,7 +4282,8 @@ class Veyra {
         $last_label = $last ? 'last scan: ' . wp_date('Y-m-d H:i', $last) : 'never scanned';
         ?>
         <style>
-            .fixed .column-veyra_bc { width: 10%; }
+            /* 8.4% (was 10%) hands part of link_synopsis's +120px over (see its rule). */
+            .fixed .column-veyra_bc { width: 8.4%; }
             .veyra-bc-th { font-weight: 700; }
             .veyra-bc b { font-weight: 700; }
             /* One colour per kind; state names and postal codes share theirs. */
