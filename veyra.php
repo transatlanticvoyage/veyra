@@ -3159,7 +3159,7 @@ class Veyra {
             .wp-list-table thead th,
             .wp-list-table thead td,
             .wp-list-table tfoot th,
-            .wp-list-table tfoot td { border: 1px solid #c3c4c7; }
+            .wp-list-table tfoot td { border: 1px solid #c3c4c7; background-color: #e8e9eb; }
             .wp-list-table thead tr > * + *,
             .wp-list-table tfoot tr > * + * { border-left-width: 0; }
             /* No zebra striping: every row on core's lighter (white) background, each
