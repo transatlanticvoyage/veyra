@@ -3203,7 +3203,6 @@ class Veyra {
                 vertical-align: top;
                 white-space: nowrap;
             }
-            .veyra-lsyn-tbl tr:nth-child(even) td { background: #f6f7f7; }
             .veyra-lsyn-nf { width: 44px; text-align: center; font-weight: 600; }
             .veyra-lsyn-nf.is-nofollow { color: #b32d2e; }
             .veyra-lsyn-nf.is-follow { color: #2271b1; }
