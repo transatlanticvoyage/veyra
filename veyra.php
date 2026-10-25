@@ -194,6 +194,10 @@ class Veyra {
         add_filter('post_row_actions', array($this, 'veyra_ds_row_action'), 10, 2);
         add_action('wp_ajax_veyra_date_switch', array($this, 'ajax_date_switch'));
         add_action('admin_footer-edit.php', array($this, 'veyra_ds_footer_assets'));
+        // Same panel on the classic post editor, as a "DATE SWITCH" sidebar box
+        // placed directly under Publish.
+        add_action('add_meta_boxes_post', array($this, 'veyra_ds_add_meta_box'));
+        add_action('admin_footer-post.php', array($this, 'veyra_ds_footer_assets'));
 
         // "boldcrypted" column (rightmost) on the Posts list + "f400 - boldcrypt scan"
         // button. The scan stores each post_title with <b class="niche|city|state">
@@ -3688,6 +3692,8 @@ class Veyra {
         $post   = get_post($post_id);
         $labels = array('publish' => 'Published', 'future' => 'Scheduled');
         $label  = isset($labels[$post->post_status]) ? $labels[$post->post_status] : 'Last Modified';
+        // Publish-box wording, as core's post_submit_meta_box() prints it.
+        $box_labels = array('publish' => 'Published on:', 'future' => 'Scheduled for:', 'private' => 'Published on:');
         wp_send_json_success(array(
             'post_id' => $post_id,
             'date'    => $post->post_date,
@@ -3698,15 +3704,47 @@ class Veyra {
                 mysql2date(get_option('date_format'), $post->post_date),
                 mysql2date(get_option('time_format'), $post->post_date)
             ),
+            'box_label' => isset($box_labels[$post->post_status]) ? $box_labels[$post->post_status] : 'Publish on:',
+            'box_date'  => date_i18n(_x('M j, Y \a\t H:i', 'publish box date format'), strtotime($post->post_date)),
+            'parts'     => array(
+                'aa' => mysql2date('Y', $post->post_date), 'mm' => mysql2date('m', $post->post_date),
+                'jj' => mysql2date('d', $post->post_date), 'hh' => mysql2date('H', $post->post_date),
+                'mn' => mysql2date('i', $post->post_date), 'ss' => mysql2date('s', $post->post_date),
+            ),
         ));
     }
 
-    /** CSS + JS for the Date Switch panel, Posts list screen only. */
-    public function veyra_ds_footer_assets() {
-        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
-        if (!$screen || $screen->base !== 'edit' || $screen->post_type !== 'post') {
+    /**
+     * "DATE SWITCH" box on the post editor. Registered 'high' so it lands at the
+     * top of the sidebar even without JS; the footer script then moves it to sit
+     * directly under the Publish box (#submitdiv).
+     */
+    public function veyra_ds_add_meta_box($post) {
+        if (!current_user_can('edit_post', $post->ID)) {
             return;
         }
+        add_meta_box('veyra_ds_box', 'DATE SWITCH', array($this, 'veyra_ds_render_meta_box'), 'post', 'side', 'high');
+    }
+
+    public function veyra_ds_render_meta_box($post) {
+        if ($post->post_status === 'auto-draft') {
+            echo '<p class="description">Save the post once to use Date Switch.</p>';
+            return;
+        }
+        printf('<div class="veyra-ds-mount" data-post="%d"></div>', (int) $post->ID);
+    }
+
+    /**
+     * CSS + JS for the Date Switch panel. Two places, one panel:
+     *   Posts list (edit.php) — opens on hover/click of the "Date Switch" row action.
+     *   Post editor (post.php) — always open inside the DATE SWITCH sidebar box.
+     */
+    public function veyra_ds_footer_assets() {
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+        if (!$screen || !in_array($screen->base, array('edit', 'post'), true) || $screen->post_type !== 'post') {
+            return;
+        }
+        $inline = $screen->base === 'post';
         $nonce = wp_create_nonce('veyra_elephant_tools');
         // Each mode: one past range, NOW, three future ranges. Medium ≈ 2× Fast,
         // Slow ≈ 2× Medium.
@@ -3728,6 +3766,8 @@ class Veyra {
                 position: relative; z-index: 5;
             }
             .veyra-ds-panel.is-open { display: block; }
+            /* Editor sidebar: sits flat inside its postbox. */
+            .veyra-ds-panel.is-inline { margin: 0; padding: 0; border: 0; box-shadow: none; }
             .veyra-ds-tabs, .veyra-ds-btns { display: flex; }
             .veyra-ds-tabs { margin-bottom: 5px; }
             /* Joined: neighbours share one border, no gap. */
@@ -3769,6 +3809,7 @@ class Veyra {
             var NONCE = <?php echo wp_json_encode($nonce); ?>;
             var MODES = <?php echo wp_json_encode($modes); ?>;
             var CUSTOM = <?php echo wp_json_encode($custom); ?>;
+            var INLINE = <?php echo $inline ? 'true' : 'false'; ?>;
             var mode = 'fast';
             try { var saved = localStorage.getItem('veyra_ds_mode'); if (saved && MODES[saved]) mode = saved; } catch (e) {}
 
@@ -3850,6 +3891,7 @@ class Veyra {
             }
             function keep(){ clearTimeout(hideTimer); }
             function scheduleHide(){
+                if (INLINE) return; // the editor box never closes
                 clearTimeout(hideTimer);
                 hideTimer = setTimeout(function(){
                     if (panel && panel.classList.contains('is-busy')) return;
@@ -3918,7 +3960,8 @@ class Veyra {
                         var d = res.data;
                         status.style.color = '#00701c';
                         status.textContent = '✓ ' + d.date + ' — ' + d.label;
-                        var row = document.getElementById('post-' + d.post_id);
+                        if (INLINE) syncPublishBox(d);
+                        var row = INLINE ? null : document.getElementById('post-' + d.post_id);
                         if (row) {
                             var cell = row.querySelector('td.column-date');
                             if (cell) { cell.innerHTML = ''; cell.appendChild(document.createTextNode(d.label)); cell.appendChild(document.createElement('br')); cell.appendChild(document.createTextNode(d.display)); }
@@ -3927,6 +3970,43 @@ class Veyra {
                     })
                     .catch(function(err){ status.style.color = '#dc3232'; status.textContent = err.message; })
                     .finally(function(){ panel.classList.remove('is-busy'); });
+            }
+
+            /**
+             * Editor only: mirror the new date into the Publish box. Both the visible
+             * fields (aa/mm/jj/hh/mn/ss) and their hidden_* twins get the new value:
+             * core only treats the date as edited when the two differ, so a later
+             * Update / Save Draft keeps the date we just saved instead of writing
+             * the page-load date back over it.
+             */
+            function syncPublishBox(d){
+                var ts = document.getElementById('timestamp');
+                if (ts) {
+                    ts.textContent = d.box_label + ' ';
+                    var b = document.createElement('b');
+                    b.textContent = d.box_date;
+                    ts.appendChild(b);
+                }
+                Object.keys(d.parts).forEach(function(k){
+                    ['', 'hidden_'].forEach(function(pre){
+                        var el = document.getElementById(pre + k);
+                        if (el) el.value = d.parts[k];
+                    });
+                });
+            }
+
+            if (INLINE) {
+                var mount = document.querySelector('.veyra-ds-mount');
+                if (mount) {
+                    var box = document.getElementById('veyra_ds_box');
+                    var submit = document.getElementById('submitdiv');
+                    if (box && submit && submit.nextElementSibling !== box) submit.insertAdjacentElement('afterend', box);
+                    buildPanel();
+                    panel.classList.add('is-open', 'is-inline');
+                    panel.setAttribute('data-post', mount.getAttribute('data-post'));
+                    mount.appendChild(panel);
+                }
+                return;
             }
 
             document.addEventListener('mouseover', function(e){
