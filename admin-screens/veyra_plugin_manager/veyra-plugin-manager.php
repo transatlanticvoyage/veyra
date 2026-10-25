@@ -72,16 +72,67 @@ function veyra_plugin_manager_is_blocked_host() {
  * Menu registration
  * ------------------------------------------------------------------------- */
 
+/**
+ * Small colourful "update" glyph (gradient disc + white refresh arrows) shown
+ * left of "Veyra Plugin Updater" in the sidebar submenu and admin-bar dropdown.
+ */
+function veyra_plugin_manager_icon_svg($size = 16) {
+    $size = (int) $size;
+    return '<svg class="veyra-pm-icon" width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" aria-hidden="true" focusable="false" style="display:inline-block;vertical-align:-3px;margin-right:6px;flex:0 0 auto;">'
+        . '<defs><linearGradient id="veyraPmIconG" x1="0" y1="0" x2="1" y2="1">'
+        . '<stop offset="0" stop-color="#f59e0b"/><stop offset="0.5" stop-color="#ec4899"/><stop offset="1" stop-color="#6366f1"/>'
+        . '</linearGradient></defs>'
+        . '<circle cx="12" cy="12" r="12" fill="url(#veyraPmIconG)"/>'
+        . '<path d="M17.2 9.2A5.6 5.6 0 0 0 7 8.4M6.8 14.8A5.6 5.6 0 0 0 17 15.6" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/>'
+        . '<path d="M17.8 5.6v3.9h-3.9zM6.2 18.4v-3.9h3.9z" fill="#fff"/>'
+        . '</svg>';
+}
+
 add_action('admin_menu', 'veyra_plugin_manager_register_menu', 20);
 function veyra_plugin_manager_register_menu() {
     add_submenu_page(
         'veyra-hub-1',                          // parent slug (Veyra Hub 1)
-        'Veyra Plugin Manager',                 // page title
-        'Plugin Updater',                       // menu label
+        'Veyra Plugin Updater',                 // page title
+        veyra_plugin_manager_icon_svg() . 'Veyra Plugin Updater', // menu label
         'manage_options',                       // capability
         'veyra_plugin_manager',                 // page slug
         'veyra_plugin_manager_render_page'      // callback
     );
+}
+
+/**
+ * Move "Veyra Plugin Updater" to the top of the Veyra Hub 1 submenu. Runs after
+ * every other screen has registered its submenu item.
+ */
+add_action('admin_menu', 'veyra_plugin_manager_menu_first', 9999);
+function veyra_plugin_manager_menu_first() {
+    global $submenu;
+    if (empty($submenu['veyra-hub-1'])) {
+        return;
+    }
+    foreach ($submenu['veyra-hub-1'] as $i => $item) {
+        if (isset($item[2]) && $item[2] === 'veyra_plugin_manager') {
+            unset($submenu['veyra-hub-1'][$i]);
+            array_unshift($submenu['veyra-hub-1'], $item);
+            break;
+        }
+    }
+}
+
+/**
+ * WP points a top-level menu link at its FIRST submenu item, which is now the
+ * updater. Keep the "Veyra Hub 1" top-level link going to the hub page itself.
+ */
+add_action('admin_footer', 'veyra_plugin_manager_toplevel_href');
+function veyra_plugin_manager_toplevel_href() {
+    ?>
+    <script>
+    (function () {
+        var a = document.querySelector('#toplevel_page_veyra-hub-1 > a');
+        if (a) { a.href = <?php echo wp_json_encode(admin_url('admin.php?page=veyra-hub-1')); ?>; }
+    })();
+    </script>
+    <?php
 }
 
 /* ---------------------------------------------------------------------------
@@ -91,6 +142,97 @@ function veyra_plugin_manager_register_menu() {
 add_action('wp_ajax_veyra_toggle_plugin', 'veyra_plugin_manager_ajax_toggle');
 add_action('wp_ajax_veyra_delete_plugin', 'veyra_plugin_manager_ajax_delete');
 add_action('wp_ajax_veyra_update_from_github', 'veyra_plugin_manager_ajax_update_github');
+add_action('wp_ajax_veyra_pm_check_update', 'veyra_plugin_manager_ajax_check_update');
+
+/**
+ * Is the GitHub branch different from what is installed here?
+ *
+ * The Version: header is not bumped on every commit, so comparing versions
+ * misses most updates. Instead this reads the branch's file tree (one GitHub
+ * API call) and compares each file's git blob SHA with a SHA computed from the
+ * local copy. Any changed or missing file = update available. Local-only files
+ * are ignored. Falls back to the Version: header if the API call fails.
+ *
+ * Returns array(
+ *   'state'          => 'available' | 'current' | 'unknown',
+ *   'changed'        => int files that differ (tree check only),
+ *   'remote_version' => string|null,
+ *   'local_version'  => string,
+ *   'method'         => 'tree' | 'version' | 'none',
+ *   'error'          => string (only when state is unknown),
+ * )
+ * Cached for 10 minutes; $force skips the cache.
+ */
+function veyra_plugin_manager_update_status($force = false) {
+    $cache_key = 'veyra_pm_update_status';
+    if (!$force) {
+        $cached = get_site_transient($cache_key);
+        if (is_array($cached)) {
+            return $cached;
+        }
+    }
+
+    $info = veyra_plugin_manager_self_info();
+    require_once VEYRA_PLUGIN_PATH . 'includes/class-veyra-github-client.php';
+    $repo_info = Veyra_GitHub_Client::parse_github_url($info['github_url']);
+
+    $status = array(
+        'state'          => 'unknown',
+        'changed'        => 0,
+        'remote_version' => null,
+        'local_version'  => $info['version'],
+        'method'         => 'none',
+    );
+    if (!$repo_info) {
+        $status['error'] = 'Could not parse GitHub URL: ' . $info['github_url'];
+        return $status;
+    }
+
+    $client = new Veyra_GitHub_Client();
+    $rv = $client->get_remote_version($repo_info['owner'], $repo_info['repo'], $info['branch'], $info['main_file']);
+    if (!is_array($rv)) {
+        $status['remote_version'] = $rv;
+    }
+
+    $tree = $client->get_tree_blobs($repo_info['owner'], $repo_info['repo'], $info['branch']);
+    if (!isset($tree['error'])) {
+        $changed = 0;
+        foreach ($tree as $path => $sha) {
+            $local = VEYRA_PLUGIN_PATH . $path;
+            if (!is_file($local) || !is_readable($local)) {
+                $changed++;
+                continue;
+            }
+            $body = file_get_contents($local);
+            if ($body === false || sha1('blob ' . strlen($body) . "\0" . $body) !== $sha) {
+                $changed++;
+            }
+        }
+        $status['method']  = 'tree';
+        $status['changed'] = $changed;
+        $status['state']   = $changed > 0 ? 'available' : 'current';
+    } elseif ($status['remote_version'] !== null) {
+        $status['method'] = 'version';
+        $status['state']  = version_compare($status['remote_version'], $info['version'], '>') ? 'available' : 'current';
+    } else {
+        $status['error'] = $tree['error'];
+    }
+
+    // Don't cache failures, so the next page load retries.
+    if ($status['state'] !== 'unknown') {
+        set_site_transient($cache_key, $status, 10 * MINUTE_IN_SECONDS);
+    }
+    return $status;
+}
+
+function veyra_plugin_manager_ajax_check_update() {
+    check_ajax_referer('veyra_plugin_update', 'nonce');
+    if (!current_user_can('update_plugins')) {
+        wp_send_json_error('Insufficient permissions');
+    }
+    $force = !empty($_POST['force']);
+    wp_send_json_success(veyra_plugin_manager_update_status($force));
+}
 
 function veyra_plugin_manager_ajax_toggle() {
     check_ajax_referer('veyra_plugin_action', 'nonce');
@@ -169,6 +311,7 @@ function veyra_plugin_manager_ajax_update_github() {
         wp_cache_delete('plugins', 'plugins');
     }
     delete_site_transient('update_plugins');
+    delete_site_transient('veyra_pm_update_status');
 
     // Re-read the plugin header straight off disk. The folder has already been
     // swapped, so this reports the version that is now installed, letting the
@@ -212,14 +355,22 @@ function veyra_plugin_manager_render_page() {
         }
     }
 
-    $needs_update = ($remote_version && version_compare($remote_version, $info['version'], '>'));
+    // Same commit-level check the Posts-list button uses; version compare only
+    // if that check could not run.
+    $update_status = veyra_plugin_manager_update_status();
+    if ($update_status['state'] !== 'unknown') {
+        $needs_update = ($update_status['state'] === 'available');
+        $remote_error = null;
+    } else {
+        $needs_update = ($remote_version && version_compare($remote_version, $info['version'], '>'));
+    }
     $host_blocked = veyra_plugin_manager_is_blocked_host();
     ?>
     <div class="wrap">
 
         <h1 style="display: flex; align-items: center; gap: 14px; margin: 0 0 8px 0;">
             <span class="dashicons dashicons-sun" style="font-size: 30px; width: 30px; height: 30px; color: #d97706;"></span>
-            Veyra Plugin Manager
+            Veyra Plugin Updater
         </h1>
         <p style="color: #666; margin: 0 0 20px 0;">Manage the Veyra plugin and update it from GitHub.</p>
 
@@ -525,6 +676,142 @@ function veyra_plugin_manager_render_page() {
                 });
             }
         });
+    });
+    </script>
+    <?php
+}
+
+/* ---------------------------------------------------------------------------
+ * "Update From GitHub" button on the native list screens (edit.php), placed
+ * right of "Add New Post". Status is fetched by AJAX after the page loads so
+ * GitHub latency never slows the list down; the click runs the same
+ * veyra_update_from_github action as the Veyra Plugin Updater screen.
+ * ------------------------------------------------------------------------- */
+
+add_action('admin_footer-edit.php', 'veyra_plugin_manager_list_button');
+function veyra_plugin_manager_list_button() {
+    if (!current_user_can('update_plugins')) {
+        return;
+    }
+    ?>
+    <style id="veyra-pm-list-css">
+        .veyra-pm-gh{display:inline-flex;align-items:center;gap:7px;margin-left:4px;position:relative;top:-3px;padding:4px 10px;
+            border:1px solid #1f2328;border-radius:3px;background:#24292f;color:#fff;font-size:13px;font-weight:600;line-height:1.6;cursor:pointer;vertical-align:top;}
+        .veyra-pm-gh:hover{background:#32383f;}
+        .veyra-pm-gh:disabled{opacity:.7;cursor:wait;}
+        .veyra-pm-gh svg{flex:0 0 auto;}
+        .veyra-pm-gh-pill{display:inline-flex;align-items:center;gap:4px;padding:0 7px;border-radius:9px;font-size:11px;font-weight:600;line-height:18px;background:#57606a;color:#fff;white-space:nowrap;}
+        .veyra-pm-gh-pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;opacity:.9;}
+        .veyra-pm-gh-pill.is-available{background:#fb8500;}
+        .veyra-pm-gh-pill.is-current{background:#1a7f37;}
+        .veyra-pm-gh-pill.is-unknown{background:#6e7781;}
+        #veyra-pm-gh-notice{margin:10px 0 6px;}
+    </style>
+    <script>
+    // Built on window load, after the other heading controls (inserted on
+    // DOMContentLoaded right after "Add New Post"), so this lands directly
+    // beside the native button instead of being pushed to the end of the row.
+    window.addEventListener('load', function () {
+        var ajax  = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+        var nonce = <?php echo wp_json_encode(wp_create_nonce('veyra_plugin_update')); ?>;
+        var mgr   = <?php echo wp_json_encode(admin_url('admin.php?page=veyra_plugin_manager')); ?>;
+
+        var anchor = document.querySelector('.wrap .page-title-action') || document.querySelector('.wrap h1.wp-heading-inline');
+        if (!anchor) { return; }
+
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'veyra-pm-gh';
+        btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path fill="#fff" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>'
+            + '<span class="veyra-pm-gh-label">Update From GitHub</span>'
+            + '<span class="veyra-pm-gh-pill is-unknown">checking…</span>';
+        anchor.insertAdjacentElement('afterend', btn);
+
+        var label = btn.querySelector('.veyra-pm-gh-label');
+        var pill  = btn.querySelector('.veyra-pm-gh-pill');
+
+        function setPill(state, text, title) {
+            pill.className = 'veyra-pm-gh-pill is-' + state;
+            pill.textContent = text;
+            btn.title = title || '';
+        }
+
+        function showStatus(d) {
+            var v = 'Installed: ' + d.local_version + (d.remote_version ? '  ·  GitHub: ' + d.remote_version : '');
+            if (d.state === 'available') {
+                setPill('available', 'update available',
+                    v + (d.method === 'tree' ? '\n' + d.changed + ' file(s) differ from GitHub main' : ''));
+            } else if (d.state === 'current') {
+                setPill('current', 'up to date', v);
+            } else {
+                setPill('unknown', 'status unknown', d.error || 'Could not reach GitHub');
+            }
+        }
+
+        function post(data) {
+            var body = new URLSearchParams(data);
+            body.append('nonce', nonce);
+            return fetch(ajax, { method: 'POST', credentials: 'same-origin', body: body })
+                .then(function (r) {
+                    if (!r.ok) { throw new Error('HTTP ' + r.status); }
+                    return r.json();
+                });
+        }
+
+        function notice(type, html) {
+            var old = document.getElementById('veyra-pm-gh-notice');
+            if (old) { old.remove(); }
+            var n = document.createElement('div');
+            n.id = 'veyra-pm-gh-notice';
+            n.className = 'notice notice-' + type + ' is-dismissible';
+            n.innerHTML = '<p>' + html + '</p><button type="button" class="notice-dismiss"><span class="screen-reader-text">Dismiss this notice.</span></button>';
+            n.querySelector('.notice-dismiss').addEventListener('click', function () { n.remove(); });
+            var end = document.querySelector('.wrap .wp-header-end');
+            (end || btn).insertAdjacentElement('afterend', n);
+        }
+
+        function esc(s) {
+            return String(s).replace(/[&<>"']/g, function (c) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+            });
+        }
+
+        function check(force) {
+            setPill('unknown', 'checking…');
+            return post({ action: 'veyra_pm_check_update', force: force ? 1 : 0 })
+                .then(function (res) {
+                    if (res && res.success) { showStatus(res.data); }
+                    else { setPill('unknown', 'status unknown', res && res.data ? String(res.data) : ''); }
+                })
+                .catch(function (e) { setPill('unknown', 'status unknown', e.message); });
+        }
+
+        btn.addEventListener('click', function () {
+            btn.disabled = true;
+            label.textContent = 'Updating…';
+            post({ action: 'veyra_update_from_github', plugin: 'veyra/veyra.php' })
+                .then(function (res) {
+                    if (res && res.success) {
+                        var d = res.data || {};
+                        notice('success', '<strong>Veyra updated from GitHub.</strong> ' + esc(d.message || '')
+                            + (d.version ? ' Now running version ' + esc(d.version) + '.' : ''));
+                        return check(true);
+                    }
+                    notice('error', '<strong>Update failed:</strong> '
+                        + esc(res && typeof res.data === 'string' && res.data ? res.data : 'The server rejected the update but gave no reason.')
+                        + ' <a href="' + mgr + '">Open Veyra Plugin Updater</a>');
+                })
+                .catch(function (e) {
+                    notice('error', '<strong>Update failed:</strong> the request did not complete (' + esc(e.message)
+                        + '). The plugin may be partially updated — check <a href="' + mgr + '">Veyra Plugin Updater</a> before retrying.');
+                })
+                .then(function () {
+                    btn.disabled = false;
+                    label.textContent = 'Update From GitHub';
+                });
+        });
+
+        check(false);
     });
     </script>
     <?php

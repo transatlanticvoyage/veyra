@@ -763,6 +763,9 @@ class Veyra {
             . '#wpadminbar #wp-admin-bar-veyra-birch-post-importer.hover > .ab-item,'
             . '#wpadminbar #wp-admin-bar-veyra-birch-post-importer > .ab-item:focus{'
             . 'background:#135e96;color:#fff;}'
+            // Icon + label on one line in the "Veyra Plugin Updater" dropdown item.
+            . '#wpadminbar #wp-admin-bar-veyra-hub-1-veyra_plugin_manager > .ab-item{'
+            . 'display:flex;align-items:center;}'
             . '</style>';
     }
 
@@ -786,9 +789,9 @@ class Veyra {
         // wp-admin, so on the front end we list the hub's registered pages explicitly.
         // Each: [ menu label, page slug, capability ].
         $hub_items = array(
+            array(veyra_plugin_manager_icon_svg() . 'Veyra Plugin Updater', 'veyra_plugin_manager', 'manage_options'),
             array('Veyra Hub 1',                    'veyra-hub-1',                     'edit_posts'),
             array('Veyra Post Importer From Birch', 'veyra_post_importer',             'edit_posts'),
-            array('Plugin Updater',                 'veyra_plugin_manager',            'manage_options'),
             array('SM Redirect Manager',            'sm_redirect_manager',             'manage_options'),
             array('Custom Blog Feed',               'veyra_custom_blog_feed',          'manage_options'),
             array('Page Change Drip Manager',       'page_change_drip_manager',        'manage_options'),

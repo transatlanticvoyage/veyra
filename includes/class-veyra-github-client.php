@@ -77,6 +77,48 @@ class Veyra_GitHub_Client {
     }
 
     /**
+     * List every file on a branch with its git blob SHA, via the git trees API
+     * (one request). Returns array(path => sha) or array('error' => ...).
+     */
+    public function get_tree_blobs($owner, $repo, $branch = 'main') {
+        $url = "https://api.github.com/repos/{$owner}/{$repo}/git/trees/" . rawurlencode($branch) . '?recursive=1';
+
+        $args = array(
+            'timeout' => 20,
+            'headers' => array(
+                'User-Agent' => 'Veyra-Plugin-Manager/1.0',
+                'Accept'     => 'application/vnd.github+json',
+            ),
+        );
+        if ($this->token) {
+            $args['headers']['Authorization'] = 'token ' . $this->token;
+        }
+
+        $response = wp_remote_get($url, $args);
+        if (is_wp_error($response)) {
+            return array('error' => $response->get_error_message());
+        }
+
+        $status_code = wp_remote_retrieve_response_code($response);
+        if ($status_code !== 200) {
+            return array('error' => 'Could not read remote file tree: HTTP ' . $status_code);
+        }
+
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($json) || empty($json['tree']) || !empty($json['truncated'])) {
+            return array('error' => 'Remote file tree missing or truncated');
+        }
+
+        $blobs = array();
+        foreach ($json['tree'] as $node) {
+            if (isset($node['type'], $node['path'], $node['sha']) && $node['type'] === 'blob') {
+                $blobs[$node['path']] = $node['sha'];
+            }
+        }
+        return $blobs;
+    }
+
+    /**
      * Download a repository branch as a ZIP. Returns array('data' => binary)
      * or array('error' => ...).
      */
