@@ -26,16 +26,52 @@ require_once __DIR__ . '/media-display-scheme.php';
 // ---------------------------------------------------------------------------
 // Menu registration — submenu under "Veyra Hub 1"
 // ---------------------------------------------------------------------------
+/**
+ * Bright blue "import" glyph (blue disc + white down-arrow into a tray) shown
+ * RIGHT of "Veyra Post Importer From Birch" in the sidebar submenu and the
+ * admin-bar dropdown.
+ */
+function veyra_post_importer_icon_svg($size = 16) {
+    $size = (int) $size;
+    return '<svg class="veyra-pi-icon" width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" aria-hidden="true" focusable="false" style="display:inline-block;vertical-align:-3px;margin-left:6px;flex:0 0 auto;">'
+        . '<circle cx="12" cy="12" r="12" fill="#0a84ff"/>'
+        . '<path d="M12 5.5v8.2M8.4 10.4 12 14l3.6-3.6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>'
+        . '<path d="M6.5 14.5v3h11v-3" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>'
+        . '</svg>';
+}
+
 add_action('admin_menu', 'veyra_post_importer_register_menu', 20);
 function veyra_post_importer_register_menu() {
     add_submenu_page(
         'veyra-hub-1',
         'Post Importer from Birch',
-        'Veyra Post Importer From Birch',
+        'Veyra Post Importer From Birch' . veyra_post_importer_icon_svg(),
         'edit_posts',
         'veyra_post_importer',
         'veyra_post_importer_render_page'
     );
+}
+
+/**
+ * Make this the 2nd item in the Veyra Hub 1 submenu (right under "Veyra Plugin
+ * Updater", which veyra_plugin_manager_menu_first() moves to the top at 9999).
+ */
+add_action('admin_menu', 'veyra_post_importer_menu_second', 10000);
+function veyra_post_importer_menu_second() {
+    global $submenu;
+    if (empty($submenu['veyra-hub-1'])) {
+        return;
+    }
+    $items = array_values($submenu['veyra-hub-1']);
+    foreach ($items as $i => $item) {
+        if (isset($item[2]) && $item[2] === 'veyra_post_importer') {
+            array_splice($items, $i, 1);
+            $pos = (isset($items[0][2]) && $items[0][2] === 'veyra_plugin_manager') ? 1 : 0;
+            array_splice($items, $pos, 0, [$item]);
+            $submenu['veyra-hub-1'] = $items;
+            break;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
