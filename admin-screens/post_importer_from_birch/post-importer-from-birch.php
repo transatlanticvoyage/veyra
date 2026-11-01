@@ -20,6 +20,9 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+// Per-site media display scheme (wp_options-backed; see that file's header).
+require_once __DIR__ . '/media-display-scheme.php';
+
 // ---------------------------------------------------------------------------
 // Menu registration — submenu under "Veyra Hub 1"
 // ---------------------------------------------------------------------------
@@ -132,6 +135,16 @@ function veyra_post_importer_handle_submit() {
     $alignment_mode = veyra_post_importer_resolve_alignment_mode($_POST['veyra_image_alignment'] ?? 'global_random_3');
     // SHOULD_REMAIN_ON_HOMEPAGE — TRUE unless the user picked the second radio.
     $sroh_true = !(isset($_POST['veyra_should_remain_on_homepage']) && $_POST['veyra_should_remain_on_homepage'] === 'false');
+    // "use this site's custom media display scheme": the scheme comes from the
+    // text box as submitted (so an unsaved edit applies to this run only).
+    $scheme = null;
+    if ($alignment_mode === 'site_scheme') {
+        $sv = veyra_media_scheme_validate(wp_unslash($_POST['veyra_media_scheme_json'] ?? ''));
+        if (isset($sv['error'])) {
+            return ['level' => 'error', 'message' => 'Media display scheme: ' . $sv['error'] . ' Nothing was imported.'];
+        }
+        $scheme = $sv['scheme'];
+    }
 
     $tmp_zip = $_FILES['veyra_pack']['tmp_name'];
 
@@ -202,7 +215,7 @@ function veyra_post_importer_handle_submit() {
 
     // Upsert: update an existing post if one is already associated with this backlink_id,
     // otherwise create a new one. (Stores tregnar_associated_linksharn_backlink_id meta.)
-    $res = veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode);
+    $res = veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode, $scheme);
     if (!empty($res['error'])) {
         return ['level' => 'error', 'message' => $res['error']];
     }
@@ -251,7 +264,13 @@ function veyra_post_importer_find_post_by_backlink_id($backlink_id) {
  * permalink is re-rendered (post_name regenerated from the new title). Otherwise a new
  * post is created. The association meta is always (re)written.
  */
-function veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode = 'global_random_3') {
+function veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode = 'global_random_3', $scheme = null) {
+    // Site scheme: build a fresh per-post context (rolls the scheme's per_post
+    // size/alignment for THIS post). It replaces $image_style, and the scheme
+    // decides size, alignment, markup and link wrapping for every image.
+    if ($alignment_mode === 'site_scheme' && is_array($scheme)) {
+        $image_style = veyra_media_scheme_make_post_context($scheme);
+    }
     // "per_post_random_3" is resolved HERE, once per post: pick one of
     // alignleft/alignright/aligncenter for THIS post only, and reuse it for
     // every image in this post. A different post in the same bulk import
@@ -396,6 +415,16 @@ function veyra_post_importer_handle_bulk_submit() {
     $alignment_mode = veyra_post_importer_resolve_alignment_mode($_POST['veyra_image_alignment'] ?? 'global_random_3');
     // SHOULD_REMAIN_ON_HOMEPAGE — TRUE unless the user picked the second radio.
     $sroh_true = !(isset($_POST['veyra_should_remain_on_homepage']) && $_POST['veyra_should_remain_on_homepage'] === 'false');
+    // "use this site's custom media display scheme": the scheme comes from the
+    // text box as submitted (so an unsaved edit applies to this run only).
+    $scheme = null;
+    if ($alignment_mode === 'site_scheme') {
+        $sv = veyra_media_scheme_validate(wp_unslash($_POST['veyra_media_scheme_json'] ?? ''));
+        if (isset($sv['error'])) {
+            return ['level' => 'error', 'message' => 'Media display scheme: ' . $sv['error'] . ' Nothing was imported.'];
+        }
+        $scheme = $sv['scheme'];
+    }
 
     $zip = new ZipArchive();
     if ($zip->open($_FILES['veyra_pack']['tmp_name']) !== true) {
@@ -441,7 +470,7 @@ function veyra_post_importer_handle_bulk_submit() {
         if ($bid !== '') $seen_ids[$bid] = true;
 
         $image_assets = veyra_post_importer_extract_zip_images($zip, $parts['images']);
-        $res = veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode);
+        $res = veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode, $scheme);
         if (!empty($res['error'])) {
             $results[] = ['error' => $res['error'], 'title' => $parsed['page_title'], 'folder' => $folder];
             $skipped++;
@@ -646,6 +675,7 @@ function veyra_post_importer_insert_images($content, array $image_assets, $style
  */
 function veyra_post_importer_resolve_alignment_mode($raw) {
     switch ($raw) {
+        case 'site_scheme':
         case 'per_image_random_4':
         case 'per_image_random_3':
         case 'per_post_random_3':
@@ -705,6 +735,10 @@ function veyra_post_importer_pick_alignment_class($alignment_mode = 'global_rand
  * $alignment_mode: see veyra_post_importer_pick_alignment_class() — applies to both styles.
  */
 function veyra_post_importer_format_image_block($asset, $style = 'plain', $alignment_mode = 'global_random_3') {
+    // Site-scheme context object (see upsert_post) overrides style + alignment.
+    if (is_object($style) && isset($style->scheme)) {
+        return veyra_media_scheme_format_image($asset, $style);
+    }
     $url   = isset($asset['url']) ? $asset['url'] : '';
     $alt   = isset($asset['alt']) ? $asset['alt'] : '';
     $id    = isset($asset['id'])  ? $asset['id']  : null;
@@ -738,6 +772,11 @@ function veyra_post_importer_render_page() {
     if (!$result) { $result = veyra_post_importer_handle_bulk_submit(); }
     $nonce  = wp_create_nonce('veyra_post_importer_f5607');
     $self   = admin_url('admin.php?page=veyra_post_importer');
+    // Generated + saved on first view if this site has no scheme yet.
+    $site_scheme      = veyra_media_scheme_get_saved();
+    $site_scheme_json = veyra_media_scheme_to_json($site_scheme);
+    $scheme_nonce     = wp_create_nonce('veyra_media_scheme');
+    $can_save_scheme  = current_user_can('manage_options');
     ?>
     <div class="wrap">
         <h1 style="margin-bottom: 20px;">Veyra Post Importer From Birch</h1>
@@ -827,7 +866,30 @@ function veyra_post_importer_render_page() {
             <fieldset style="margin-bottom: 16px;">
                 <legend style="font-weight: 600; margin-bottom: 6px;">ALIGNMENT OPTIONS</legend>
                 <label style="display: block; margin-bottom: 4px;">
-                    <input type="radio" name="veyra_image_alignment" value="global_random_3" checked />
+                    <input type="radio" name="veyra_image_alignment" value="site_scheme" checked />
+                    use this site's custom media display scheme
+                </label>
+                <div id="veyra-media-scheme-box" style="margin: 4px 0 12px 24px; padding: 10px 12px; border: 1px solid #c3c4c7; border-radius: 4px; background: #fff;">
+                    <textarea id="veyra-media-scheme-json" name="veyra_media_scheme_json" rows="14" spellcheck="false"
+                              style="width: 100%; font-family: Menlo, Consolas, monospace; font-size: 12px; line-height: 1.45;"
+                              data-saved="<?php echo esc_attr($site_scheme_json); ?>"><?php echo esc_textarea($site_scheme_json); ?></textarea>
+                    <div id="veyra-media-scheme-summary" style="font-size: 12px; color: #1d2327; margin: 6px 0;" data-saved-summary="<?php echo esc_attr(veyra_media_scheme_describe($site_scheme)); ?>"><?php echo esc_html(veyra_media_scheme_describe($site_scheme)); ?></div>
+                    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                        <button type="button" class="button" id="veyra-media-scheme-random">randomly generate new scheme</button>
+                        <button type="button" class="button button-primary" id="veyra-media-scheme-save" <?php disabled(!$can_save_scheme); ?>>save as this site's scheme</button>
+                        <button type="button" class="button" id="veyra-media-scheme-revert">revert to saved</button>
+                        <span id="veyra-media-scheme-status" style="font-size: 12px; color: #666;">saved</span>
+                    </div>
+                    <p style="color: #666; font-size: 12px; margin: 8px 0 0;">
+                        Stored in the <code><?php echo esc_html(VEYRA_MEDIA_SCHEME_OPTION); ?></code> wp_option (no custom tables). Overrides IMAGE DISPLAY OPTIONS.
+                        An import uses whatever is in this box when you click f5608. An unsaved edit applies to that run only and does not change the saved scheme.<br>
+                        <code>image_size</code> / <code>alignment</code>: relative weights. Sizes: thumbnail, medium, medium_large, large, full. Alignments: alignleft, alignright, aligncenter, alignnone.
+                        <code>*_pick</code>: per_post (one roll reused for every image in the post) or per_image.
+                        <code>markup</code>: wp_native | plain. <code>link_to</code>: none | media_file. <code>first_image</code>: null or {"size", "alignment"} pinned for each post's first image.
+                    </p>
+                </div>
+                <label style="display: block; margin-bottom: 4px;">
+                    <input type="radio" name="veyra_image_alignment" value="global_random_3" />
                     randomly choose alignleft/alignright/aligncenter and use for all images in all posts
                 </label>
                 <label style="display: block; margin-bottom: 4px;">
@@ -863,7 +925,7 @@ function veyra_post_importer_render_page() {
                     use aligncenter on all images in all posts
                 </label>
                 <p style="color: #666; font-size: 12px; margin-top: 4px;">
-                    The top option (default) picks one alignment ONCE per import and applies it to every image in every post processed by that import — it does not vary image-to-image or post-to-post.
+                    The top option (default) follows this site's saved media display scheme. The <code>randomly choose … use for all images in all posts</code> option picks one alignment ONCE per import and applies it to every image in every post processed by that import.
                 </p>
             </fieldset>
 
@@ -892,18 +954,12 @@ function veyra_post_importer_render_page() {
                 <legend style="font-weight: 600; margin-bottom: 6px;">Import pack (.zip from birch wizard)</legend>
                 <input type="file" name="veyra_pack" accept=".zip" required />
                 <p style="color: #666; font-size: 12px; margin-top: 4px;">
-                    <strong>Single (f5607):</strong> a single pack — article.txt (with <code>### linksharn.backlink_id</code> / <code>### birch_frontend_date</code> / <code>### page_title</code> / <code>### page_content</code>) plus image files at the root.<br>
-                    <strong>Bulk (f5608):</strong> a bulk pack — one <em>subfolder per article</em>, each containing its own article.txt + images.<br>
+                    <strong>Bulk (f5608):</strong> a bulk pack — one <em>subfolder per article</em>, each containing its own article.txt (with <code>### linksharn.backlink_id</code> / <code>### birch_frontend_date</code> / <code>### page_title</code> / <code>### page_content</code>) + images.<br>
                     Both: if a post is already associated with the same <code>linksharn.backlink_id</code> (via the <code>tregnar_associated_linksharn_backlink_id</code> meta), it is <strong>updated</strong> instead of duplicated.
                 </p>
             </fieldset>
 
-            <button type="submit" name="veyra_post_importer_action" value="f5607_import" class="button button-primary"
-                    style="padding: 8px 20px; font-size: 14px; background: #6b7280; border-color: #4b5563; color: #fff;">
-                (deprecated) f5607 - import birch-to-veyra article import pack
-            </button>
-
-            <div style="margin-top: 14px; padding-top: 14px; border-top: 1px solid #e5e5e5;">
+            <div>
                 <button type="submit" name="veyra_post_importer_action" value="f5608_bulk_import" class="button button-primary"
                         style="padding: 8px 20px; font-size: 14px; background: #2563eb; border-color: #1d4ed8; color: #fff;">
                     f5608 - bulk import birch-to-veyra article import pack
@@ -915,5 +971,66 @@ function veyra_post_importer_render_page() {
             </div><!-- /columns -->
         </form>
     </div>
+    <script>
+    (function () {
+        var ta      = document.getElementById('veyra-media-scheme-json');
+        var summary = document.getElementById('veyra-media-scheme-summary');
+        var status  = document.getElementById('veyra-media-scheme-status');
+        var box     = document.getElementById('veyra-media-scheme-box');
+        if (!ta) return;
+        var ajaxUrl = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+        var nonce   = <?php echo wp_json_encode($scheme_nonce); ?>;
+
+        function setStatus(text, color) { status.textContent = text; status.style.color = color || '#666'; }
+        function refreshDirty() {
+            if (ta.value.trim() === ta.getAttribute('data-saved').trim()) setStatus('saved', '#166534');
+            else setStatus('unsaved changes: this box is used for the next import, saved scheme unchanged', '#b45309');
+        }
+        function post(action, extra) {
+            var body = new URLSearchParams(Object.assign({ action: action, nonce: nonce }, extra || {}));
+            return fetch(ajaxUrl, { method: 'POST', credentials: 'same-origin', body: body })
+                .then(function (r) { return r.json(); });
+        }
+        ta.addEventListener('input', refreshDirty);
+
+        document.getElementById('veyra-media-scheme-random').addEventListener('click', function () {
+            setStatus('generating…');
+            post('veyra_media_scheme_generate').then(function (res) {
+                if (!res.success) { setStatus('error: ' + (res.data && res.data.message || 'failed'), '#991b1b'); return; }
+                ta.value = res.data.json;
+                summary.textContent = res.data.summary;
+                refreshDirty();
+            }).catch(function () { setStatus('error: request failed', '#991b1b'); });
+        });
+
+        document.getElementById('veyra-media-scheme-save').addEventListener('click', function () {
+            setStatus('saving…');
+            post('veyra_media_scheme_save', { scheme: ta.value }).then(function (res) {
+                if (!res.success) { setStatus('not saved: ' + (res.data && res.data.message || 'failed'), '#991b1b'); return; }
+                ta.value = res.data.json;
+                ta.setAttribute('data-saved', res.data.json);
+                summary.setAttribute('data-saved-summary', res.data.summary);
+                summary.textContent = res.data.summary;
+                refreshDirty();
+            }).catch(function () { setStatus('error: request failed', '#991b1b'); });
+        });
+
+        document.getElementById('veyra-media-scheme-revert').addEventListener('click', function () {
+            ta.value = ta.getAttribute('data-saved');
+            summary.textContent = summary.getAttribute('data-saved-summary');
+            refreshDirty();
+        });
+
+        // Show the scheme box only while its radio is selected.
+        var radios = document.querySelectorAll('input[name="veyra_image_alignment"]');
+        function syncBox() {
+            var sel = document.querySelector('input[name="veyra_image_alignment"]:checked');
+            box.style.display = (sel && sel.value === 'site_scheme') ? '' : 'none';
+        }
+        radios.forEach(function (r) { r.addEventListener('change', syncBox); });
+        syncBox();
+        refreshDirty();
+    })();
+    </script>
     <?php
 }
