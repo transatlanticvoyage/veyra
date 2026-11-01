@@ -791,6 +791,7 @@ class Veyra {
         $hub_items = array(
             array(veyra_plugin_manager_icon_svg() . 'Veyra Plugin Updater', 'veyra_plugin_manager', 'manage_options'),
             array((function_exists('veyra_post_importer_icon_svg') ? veyra_post_importer_icon_svg() : '') . 'Veyra Post Importer From Birch', 'veyra_post_importer', 'edit_posts'),
+            array((function_exists('veyra_alt_icon_svg') ? veyra_alt_icon_svg() : '') . 'Authority Links Trimmer', 'veyra_authority_links_trimmer', 'edit_posts'),
             array('Veyra Hub 1',                    'veyra-hub-1',                     'edit_posts'),
             array('SM Redirect Manager',            'sm_redirect_manager',             'manage_options'),
             array('Custom Blog Feed',               'veyra_custom_blog_feed',          'manage_options'),
@@ -5631,6 +5632,7 @@ register_activation_hook(__FILE__, array($veyra, 'veyra_editor_boxes_create_tabl
 // and render callback. Keeps page-specific code out of this main file.
 // ---------------------------------------------------------------------------
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/post_importer_from_birch/post-importer-from-birch.php';
+require_once VEYRA_PLUGIN_PATH . 'admin-screens/authority-links-trimmer/authority-links-trimmer.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/veyra_plugin_manager/veyra-plugin-manager.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/sm-redirect-manager/sm-redirect-manager.php';
 require_once VEYRA_PLUGIN_PATH . 'admin-screens/majestic_data_jar/majestic-data-jar.php';
