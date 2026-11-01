@@ -815,6 +815,12 @@ function veyra_post_importer_render_page() {
     $can_save_scheme  = current_user_can('manage_options');
     ?>
     <div class="wrap">
+        <?php if (function_exists('veyra_plugin_manager_render_updater_grid')): ?>
+            <!-- Same grid as the Veyra Plugin Updater screen, so Veyra can be updated from here. -->
+            <div style="margin: 10px 0 22px 0;">
+                <?php veyra_plugin_manager_render_updater_grid(); ?>
+            </div>
+        <?php endif; ?>
         <h1 style="margin-bottom: 20px;">Veyra Post Importer From Birch</h1>
 
         <?php if ($result): ?>

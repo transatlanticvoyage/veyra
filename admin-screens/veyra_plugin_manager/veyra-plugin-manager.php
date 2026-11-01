@@ -328,9 +328,17 @@ function veyra_plugin_manager_ajax_update_github() {
  * Page render
  * ------------------------------------------------------------------------- */
 
-function veyra_plugin_manager_render_page() {
+/**
+ * The Veyra updater grid (result banner + local-env warning + the one-row
+ * plugin table with Update From Github / Activate / de plus re-activate /
+ * Deactivate / Delete) plus its CSS and JS. Shared by the Veyra Plugin
+ * Updater screen and the Post Importer From Birch screen. Renders nothing for
+ * users without manage_options. Uses the 10-minute cached update status, so
+ * GitHub is only hit when that cache is cold.
+ */
+function veyra_plugin_manager_render_updater_grid() {
     if (!current_user_can('manage_options')) {
-        wp_die('Insufficient permissions');
+        return;
     }
 
     $info = veyra_plugin_manager_self_info();
@@ -340,40 +348,30 @@ function veyra_plugin_manager_render_page() {
     }
     $is_active = is_plugin_active($info['basename']);
 
-    // Fetch the remote version from veyra.php on the branch.
-    require_once VEYRA_PLUGIN_PATH . 'includes/class-veyra-github-client.php';
-    $repo_info      = Veyra_GitHub_Client::parse_github_url($info['github_url']);
-    $remote_version = null;
+    $update_status  = veyra_plugin_manager_update_status();
+    $remote_version = $update_status['remote_version'];
     $remote_error   = null;
-    if ($repo_info) {
-        $client = new Veyra_GitHub_Client();
-        $rv = $client->get_remote_version($repo_info['owner'], $repo_info['repo'], $info['branch'], $info['main_file']);
-        if (is_array($rv) && isset($rv['error'])) {
-            $remote_error = $rv['error'];
-        } else {
-            $remote_version = $rv;
-        }
-    }
-
-    // Same commit-level check the Posts-list button uses; version compare only
-    // if that check could not run.
-    $update_status = veyra_plugin_manager_update_status();
     if ($update_status['state'] !== 'unknown') {
         $needs_update = ($update_status['state'] === 'available');
-        $remote_error = null;
     } else {
+        // Status check failed: try the Version: header directly.
+        require_once VEYRA_PLUGIN_PATH . 'includes/class-veyra-github-client.php';
+        $repo_info = Veyra_GitHub_Client::parse_github_url($info['github_url']);
+        if ($repo_info) {
+            $client = new Veyra_GitHub_Client();
+            $rv = $client->get_remote_version($repo_info['owner'], $repo_info['repo'], $info['branch'], $info['main_file']);
+            if (is_array($rv) && isset($rv['error'])) {
+                $remote_error = $rv['error'];
+            } else {
+                $remote_version = $rv;
+            }
+        } else {
+            $remote_error = 'Could not parse GitHub URL: ' . $info['github_url'];
+        }
         $needs_update = ($remote_version && version_compare($remote_version, $info['version'], '>'));
     }
     $host_blocked = veyra_plugin_manager_is_blocked_host();
     ?>
-    <div class="wrap">
-
-        <h1 style="display: flex; align-items: center; gap: 14px; margin: 0 0 8px 0;">
-            <span class="dashicons dashicons-sun" style="font-size: 30px; width: 30px; height: 30px; color: #d97706;"></span>
-            Veyra Plugin Updater
-        </h1>
-        <p style="color: #666; margin: 0 0 20px 0;">Manage the Veyra plugin and update it from GitHub.</p>
-
         <!-- Persistent result banner for "Update From Github". Stays on screen
              until dismissed or the page is navigated away from. -->
         <div id="veyra-pm-banner" style="display: none; position: relative; margin: 0 0 16px 0; padding: 12px 42px 12px 14px; border: 1px solid transparent; border-left-width: 4px; border-radius: 4px; font-size: 14px; line-height: 1.5;">
@@ -384,8 +382,8 @@ function veyra_plugin_manager_render_page() {
         </div>
 
         <?php if ($host_blocked): ?>
-            <div class="notice notice-warning inline" style="margin: 0 0 16px 0;">
-                <p><strong>Local environment detected.</strong> "Update From Github" is disabled here for safety. It will run on live (non-local) sites only.</p>
+            <div style="margin: 0 0 16px 0; padding: 8px 12px; background: #fcf9e8; border: 1px solid #dba617; border-left-width: 4px; border-radius: 4px;">
+                <strong>Local environment detected.</strong> "Update From Github" is disabled here for safety. It will run on live (non-local) sites only.
             </div>
         <?php endif; ?>
 
@@ -492,23 +490,6 @@ function veyra_plugin_manager_render_page() {
             </tbody>
         </table>
 
-        <div style="margin-top: 24px; padding: 16px; background: #fff; border: 1px solid #c3c4c7; border-radius: 6px; max-width: 640px;">
-            <h2 style="margin: 0 0 6px 0; font-size: 14px;">Sitemap Shortcode</h2>
-            <p style="color: #666; margin: 0 0 10px 0; font-size: 13px;">
-                Drop this shortcode into any page or post to render a linebreak-separated list of links to every published page on the site (posts are not included), with a "Home" link listed first.
-            </p>
-            <div style="display: flex; gap: 8px; align-items: center;">
-                <input type="text" readonly id="veyra-sitemap-shortcode-field"
-                       value="[veyra_sitemap_render_all_published_pages]"
-                       onclick="this.select();"
-                       style="flex: 1; font-family: monospace; font-size: 13px; padding: 8px; border: 1px solid #8c8f94; border-radius: 4px; background: #f6f7f7;">
-                <button type="button" id="veyra-sitemap-shortcode-copy"
-                        style="padding: 8px 12px; font-size: 13px; border: 1px solid #2271b1; border-radius: 4px; background: #2271b1; color: #fff; cursor: pointer;">
-                    Copy
-                </button>
-            </div>
-        </div>
-
         <style>
             .status-badge { padding: 4px 8px; border-radius: 3px; font-size: 12px; font-weight: bold; }
             .status-badge.active { background: #d1e7dd; color: #0f5132; }
@@ -519,7 +500,6 @@ function veyra_plugin_manager_render_page() {
                 border-radius: 50%; animation: veyra-spin 1s linear infinite; margin: 0 auto;
             }
         </style>
-    </div>
 
     <script>
     jQuery(document).ready(function($) {
@@ -543,19 +523,6 @@ function veyra_plugin_manager_render_page() {
 
         $('#veyra-pm-banner-dismiss').on('click', function() {
             $('#veyra-pm-banner').hide();
-        });
-
-        $('#veyra-sitemap-shortcode-copy').on('click', function() {
-            const $field = $('#veyra-sitemap-shortcode-field');
-            const $btn = $(this);
-            $field.get(0).select();
-            navigator.clipboard.writeText($field.val()).then(function() {
-                const original = $btn.text();
-                $btn.text('Copied!');
-                setTimeout(function() { $btn.text(original); }, 1500);
-            }).catch(function() {
-                document.execCommand('copy');
-            });
         });
 
         $('.plugin-action-btn').on('click', function() {
@@ -675,6 +642,58 @@ function veyra_plugin_manager_render_page() {
                     $button.prop('disabled', false).text('Update From Github');
                 });
             }
+        });
+    });
+    </script>
+    <?php
+}
+
+function veyra_plugin_manager_render_page() {
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    ?>
+    <div class="wrap">
+
+        <h1 style="display: flex; align-items: center; gap: 14px; margin: 0 0 8px 0;">
+            <span class="dashicons dashicons-sun" style="font-size: 30px; width: 30px; height: 30px; color: #d97706;"></span>
+            Veyra Plugin Updater
+        </h1>
+        <p style="color: #666; margin: 0 0 20px 0;">Manage the Veyra plugin and update it from GitHub.</p>
+
+        <?php veyra_plugin_manager_render_updater_grid(); ?>
+
+        <div style="margin-top: 24px; padding: 16px; background: #fff; border: 1px solid #c3c4c7; border-radius: 6px; max-width: 640px;">
+            <h2 style="margin: 0 0 6px 0; font-size: 14px;">Sitemap Shortcode</h2>
+            <p style="color: #666; margin: 0 0 10px 0; font-size: 13px;">
+                Drop this shortcode into any page or post to render a linebreak-separated list of links to every published page on the site (posts are not included), with a "Home" link listed first.
+            </p>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <input type="text" readonly id="veyra-sitemap-shortcode-field"
+                       value="[veyra_sitemap_render_all_published_pages]"
+                       onclick="this.select();"
+                       style="flex: 1; font-family: monospace; font-size: 13px; padding: 8px; border: 1px solid #8c8f94; border-radius: 4px; background: #f6f7f7;">
+                <button type="button" id="veyra-sitemap-shortcode-copy"
+                        style="padding: 8px 12px; font-size: 13px; border: 1px solid #2271b1; border-radius: 4px; background: #2271b1; color: #fff; cursor: pointer;">
+                    Copy
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    jQuery(document).ready(function($) {
+        $('#veyra-sitemap-shortcode-copy').on('click', function() {
+            const $field = $('#veyra-sitemap-shortcode-field');
+            const $btn = $(this);
+            $field.get(0).select();
+            navigator.clipboard.writeText($field.val()).then(function() {
+                const original = $btn.text();
+                $btn.text('Copied!');
+                setTimeout(function() { $btn.text(original); }, 1500);
+            }).catch(function() {
+                document.execCommand('copy');
+            });
         });
     });
     </script>
