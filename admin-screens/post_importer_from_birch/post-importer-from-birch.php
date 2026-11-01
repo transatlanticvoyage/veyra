@@ -28,12 +28,12 @@ require_once __DIR__ . '/media-display-scheme.php';
 // ---------------------------------------------------------------------------
 /**
  * Bright blue "import" glyph (blue disc + white down-arrow into a tray) shown
- * RIGHT of "Veyra Post Importer From Birch" in the sidebar submenu and the
+ * LEFT of "Veyra Post Importer From Birch" in the sidebar submenu and the
  * admin-bar dropdown.
  */
 function veyra_post_importer_icon_svg($size = 16) {
     $size = (int) $size;
-    return '<svg class="veyra-pi-icon" width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" aria-hidden="true" focusable="false" style="display:inline-block;vertical-align:-3px;margin-left:6px;flex:0 0 auto;">'
+    return '<svg class="veyra-pi-icon" width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" aria-hidden="true" focusable="false" style="display:inline-block;vertical-align:-3px;margin-right:6px;flex:0 0 auto;">'
         . '<circle cx="12" cy="12" r="12" fill="#0a84ff"/>'
         . '<path d="M12 5.5v8.2M8.4 10.4 12 14l3.6-3.6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>'
         . '<path d="M6.5 14.5v3h11v-3" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>'
@@ -45,7 +45,7 @@ function veyra_post_importer_register_menu() {
     add_submenu_page(
         'veyra-hub-1',
         'Post Importer from Birch',
-        'Veyra Post Importer From Birch' . veyra_post_importer_icon_svg(),
+        veyra_post_importer_icon_svg() . 'Veyra Post Importer From Birch',
         'edit_posts',
         'veyra_post_importer',
         'veyra_post_importer_render_page'
