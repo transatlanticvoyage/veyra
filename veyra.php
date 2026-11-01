@@ -5654,3 +5654,30 @@ require_once VEYRA_PLUGIN_PATH . 'editor-boxes/veyra-post-drip-actions/veyra-pos
 // its column on the relevant wp-admin list screens.
 // ---------------------------------------------------------------------------
 require_once VEYRA_PLUGIN_PATH . 'list-table-columns/veyra-drip-actions-column/veyra-drip-actions-column.php';
+// ---------------------------------------------------------------------------
+// Colours for the Veyra action buttons injected above the native list tables
+// (edit.php): f800 rescan, f900 clean now, link_synopsis refresh, f400
+// boldcrypt scan. Those buttons are added by JS with only the stock .button
+// class, so this just paints them; behaviour is untouched.
+// ---------------------------------------------------------------------------
+add_action('admin_head-edit.php', 'veyra_list_action_button_colors');
+function veyra_list_action_button_colors() {
+    $buttons = array(
+        // class                  => array(background, border/hover)
+        'veyra-rescan-btn'   => array('#0d9488', '#0f766e'), // teal
+        'veyra-clean-btn'    => array('#ea580c', '#c2410c'), // orange
+        'veyra-lsyn-refresh' => array('#7c3aed', '#6d28d9'), // violet
+        'veyra-bc-btn'       => array('#db2777', '#be185d'), // pink
+    );
+    echo "<style id=\"veyra-list-action-button-colors\">\n";
+    foreach ($buttons as $cls => $c) {
+        printf(
+            ".wp-core-ui .button.%1\$s{background:%2\$s;border-color:%3\$s;color:#fff;}\n"
+            . ".wp-core-ui .button.%1\$s:hover,.wp-core-ui .button.%1\$s:focus{background:%3\$s;border-color:%3\$s;color:#fff;}\n"
+            . ".wp-core-ui .button.%1\$s:focus{box-shadow:0 0 0 1px #fff,0 0 0 3px %2\$s;}\n"
+            . ".wp-core-ui .button.%1\$s:disabled,.wp-core-ui .button.%1\$s[disabled]{background:%2\$s !important;border-color:%3\$s !important;color:#fff !important;opacity:.55;}\n",
+            $cls, $c[0], $c[1]
+        );
+    }
+    echo "</style>\n";
+}
