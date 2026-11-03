@@ -294,13 +294,33 @@ function veyra_post_importer_find_post_by_backlink_id($backlink_id) {
 }
 
 /**
+ * Find an existing post or page whose post_title is exactly $title (any status except
+ * trash / auto-draft). Also matches the HTML-escaped form, since titles saved through
+ * kses can store & as &amp;. Returns the oldest match's ID, or 0.
+ */
+function veyra_post_importer_find_post_by_exact_title($title) {
+    global $wpdb;
+    $title = trim((string) $title);
+    if ($title === '') return 0;
+    $id = $wpdb->get_var($wpdb->prepare(
+        "SELECT ID FROM {$wpdb->posts}
+          WHERE post_title IN (%s, %s)
+            AND post_type IN ('post', 'page')
+            AND post_status NOT IN ('trash', 'auto-draft', 'inherit')
+          ORDER BY ID ASC LIMIT 1",
+        $title, esc_html($title)
+    ));
+    return $id ? (int) $id : 0;
+}
+
+/**
  * Create or update a WP post from a parsed article + extracted images.
  * If a post already carries the tregnar_associated_linksharn_backlink_id meta matching
  * $parsed['linksharn_backlink_id'], that post is UPDATED (title, content, date) and its
  * permalink is re-rendered (post_name regenerated from the new title). Otherwise a new
  * post is created. The association meta is always (re)written.
  */
-function veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode = 'global_random_3', $scheme = null) {
+function veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode = 'global_random_3', $scheme = null, $match_title = false) {
     // Site scheme: build a fresh per-post context (rolls the scheme's per_post
     // size/alignment for THIS post). It replaces $image_style, and the scheme
     // decides size, alignment, markup and link wrapping for every image.
@@ -318,6 +338,34 @@ function veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $po
     $content_with_images = veyra_post_importer_insert_images($parsed['page_content'], $image_assets, $image_style, $alignment_mode);
     $title       = $parsed['page_title'] ?: 'Birch Import (' . current_time('Y-m-d H:i') . ')';
     $backlink_id = isset($parsed['linksharn_backlink_id']) ? trim($parsed['linksharn_backlink_id']) : '';
+
+    // "update existing posts if title matches" (f5608 tick box): a post with this exact
+    // title gets its post_content replaced by the imported content + images and nothing
+    // else changes (publish date, status, type and slug stay as they are).
+    if ($match_title) {
+        $title_match_id = veyra_post_importer_find_post_by_exact_title($parsed['page_title'] ?? '');
+        if ($title_match_id) {
+            $post_id = wp_update_post(['ID' => $title_match_id, 'post_content' => $content_with_images], true);
+            if (is_wp_error($post_id)) {
+                return ['error' => 'wp_update_post (title match) failed: ' . $post_id->get_error_message()];
+            }
+            if ($backlink_id !== '') {
+                update_post_meta($post_id, 'tregnar_associated_linksharn_backlink_id', $backlink_id);
+            }
+            return [
+                'post_id'        => (int) $post_id,
+                'updated'        => true,
+                'title_match'    => true,
+                'title'          => get_the_title($post_id),
+                'backlink_id'    => $backlink_id,
+                'images'         => count($image_assets),
+                'scheduled'      => false,
+                'scheduled_date' => '',
+                'edit_url'       => get_edit_post_link($post_id, ''),
+                'view_url'       => get_permalink($post_id),
+            ];
+        }
+    }
 
     $existing_id = veyra_post_importer_find_post_by_backlink_id($backlink_id);
 
@@ -467,6 +515,9 @@ function veyra_post_importer_handle_bulk_submit() {
         return ['level' => 'error', 'message' => 'Could not open the uploaded zip.'];
     }
 
+    // "update existing posts if title matches" tick box (ticked by default in the form)
+    $match_title = !empty($_POST['veyra_update_if_title_matches']);
+
     // Group entries by top-level folder
     $folders = []; // folder => ['article' => entry|null, 'images' => [entry,...]]
     for ($i = 0; $i < $zip->numFiles; $i++) {
@@ -506,7 +557,7 @@ function veyra_post_importer_handle_bulk_submit() {
         if ($bid !== '') $seen_ids[$bid] = true;
 
         $image_assets = veyra_post_importer_extract_zip_images($zip, $parts['images']);
-        $res = veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode, $scheme);
+        $res = veyra_post_importer_upsert_post($parsed, $image_assets, $post_type, $post_status, $image_style, $alignment_mode, $scheme, $match_title);
         if (!empty($res['error'])) {
             $results[] = ['error' => $res['error'], 'title' => $parsed['page_title'], 'folder' => $folder];
             $skipped++;
@@ -524,8 +575,8 @@ function veyra_post_importer_handle_bulk_submit() {
         'level'   => 'success',
         'bulk'    => true,
         'message' => sprintf(
-            'Bulk import complete: %d created, %d updated, %d skipped (of %d folders). should_remain_on_homepage set to %s for %d post(s).',
-            $created, $updated, $skipped, count($folders),
+            'Bulk import complete: %d created, %d updated (%d by exact title match), %d skipped (of %d folders). should_remain_on_homepage set to %s for %d post(s).',
+            $created, $updated, count(array_filter($results, function ($r) { return !empty($r['title_match']); })), $skipped, count($folders),
             $sroh_true ? 'TRUE' : 'FALSE',
             count($imported_ids)
         ),
@@ -846,7 +897,7 @@ function veyra_post_importer_render_page() {
                                 <li style="color:#991b1b;">✗ <?php echo esc_html($r['title'] ?: $r['folder']); ?> — <?php echo esc_html($r['error']); ?></li>
                             <?php else: ?>
                                 <li>
-                                    <?php echo $r['updated'] ? '↻ updated' : '＋ created'; ?>:
+                                    <?php echo !empty($r['title_match']) ? '↻ updated (title match, date kept)' : ($r['updated'] ? '↻ updated' : '＋ created'); ?>:
                                     <strong><?php echo esc_html($r['title']); ?></strong>
                                     <?php if ($r['backlink_id'] !== ''): ?><span style="color:#666;">[backlink_id <?php echo esc_html($r['backlink_id']); ?>]</span><?php endif; ?>
                                     &nbsp;<a href="<?php echo esc_url($r['edit_url']); ?>">edit</a>
@@ -991,6 +1042,18 @@ function veyra_post_importer_render_page() {
 
             <div style="flex: 1 1 460px; min-width: 380px;">
             <div style="background: #f6f7f7; border: 1px solid #c3c4c7; border-radius: 4px; padding: 16px;">
+
+            <fieldset style="margin-bottom: 16px;">
+                <label style="font-weight: 600;">
+                    <input type="checkbox" name="veyra_update_if_title_matches" value="1" checked />
+                    update existing posts if title matches
+                </label>
+                <p style="color: #666; font-size: 12px; margin: 4px 0 0 24px;">
+                    Ticked: when a post or page on this site has the <strong>exact</strong> same title as an imported article, its post_content is
+                    erased and replaced with the imported content + images. Publish date, status and slug are left unchanged.
+                    Articles with no title match import as usual. Unticked: f5608 works exactly as before.
+                </p>
+            </fieldset>
 
             <fieldset style="margin-bottom: 20px;">
                 <legend style="font-weight: 600; margin-bottom: 6px;">Import pack (.zip from birch wizard)</legend>
